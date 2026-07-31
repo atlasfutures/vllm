@@ -440,9 +440,15 @@ class AsyncLLM(EngineClient):
             data_parallel_rank=data_parallel_rank,
         )
 
-        if not sampling_params.skip_clone:
+        if isinstance(sampling_params, SamplingParams):
+            if not sampling_params.skip_clone:
+                sampling_params = sampling_params.clone()
+                sampling_params.skip_clone = True
+        else:
+            # PoolingParams intentionally has no generation-only skip_clone
+            # optimization. Clone once so input processing may safely merge
+            # model defaults without mutating the caller's session contract.
             sampling_params = sampling_params.clone()
-            sampling_params.skip_clone = True
 
         # Create request for validation, also used as the finished signal
         # once the input stream is closed.

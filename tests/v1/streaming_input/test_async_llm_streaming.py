@@ -9,6 +9,7 @@ import pytest
 
 from vllm.engine.protocol import StreamingInput
 from vllm.outputs import RequestOutput
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.output_processor import RequestOutputCollector
@@ -170,3 +171,45 @@ async def test_generate_with_async_generator():
     assert outputs[2].finished is True
     # Both inputs were processed
     assert inputs_received == ["Hello", " world"]
+
+
+@pytest.mark.asyncio
+async def test_pooling_stream_params_do_not_require_generation_skip_clone():
+    llm = MagicMock(spec=AsyncLLM)
+    llm.get_supported_tasks = AsyncMock(return_value={"embed"})
+    llm.input_processor = MagicMock()
+    final_request = MagicMock()
+    final_request.request_id = "internal-pooling-session"
+    llm.input_processor.process_inputs.return_value = final_request
+    llm._run_output_handler = MagicMock()
+    llm._add_request = AsyncMock()
+    llm._validate_streaming_input_sampling_params = (
+        AsyncLLM._validate_streaming_input_sampling_params
+    )
+    llm._add_streaming_input_request = AsyncLLM._add_streaming_input_request.__get__(
+        llm, AsyncLLM
+    )
+
+    async def empty_input_stream() -> AsyncGenerator[StreamingInput, None]:
+        if False:
+            yield StreamingInput(prompt="unused")
+
+    params = PoolingParams(task="embed", retain_pooling_state=True)
+    queue = await llm._add_streaming_input_request(
+        "pooling-session",
+        empty_input_stream(),
+        params,
+    )
+    assert queue._input_stream_task is not None
+    await queue._input_stream_task
+
+    processed_params = llm.input_processor.process_inputs.call_args.kwargs["params"]
+    assert processed_params is not params
+    assert processed_params.retain_pooling_state is True
+    llm._add_request.assert_awaited_once_with(
+        final_request,
+        None,
+        None,
+        0,
+        queue,
+    )
