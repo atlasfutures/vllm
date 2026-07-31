@@ -10,7 +10,7 @@ from torch import nn
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -323,11 +323,18 @@ class Qwen3NextAttention(nn.Module):
         # TODO: support MRoPE
         mm_config = model_config.multimodal_config if model_config else None
         text_only = mm_config is None or mm_config.language_model_only
+        additional_config = get_current_vllm_config().additional_config
+        disable_fused_qk_projection = (
+            isinstance(additional_config, dict)
+            and additional_config.get("disable_fused_qk_norm_rope_gate", False)
+            is True
+        )
         self.use_fused_qk_norm_rope_gate = (
             self.attn_output_gate
             and getattr(self.rotary_emb, "is_neox_style", False)
             and current_platform.is_cuda()
             and text_only
+            and not disable_fused_qk_projection
         )
 
     def _project_qkv_gate(
