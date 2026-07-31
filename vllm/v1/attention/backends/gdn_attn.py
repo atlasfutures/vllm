@@ -100,7 +100,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             _resolve_gdn_prefill_backend,
         )
 
-        self.gdn_prefill_backend: Literal["triton", "flashinfer", "cutedsl"]
+        self.gdn_prefill_backend: Literal[
+            "triton", "flashinfer", "cutedsl", "torch_reference"
+        ]
         _, self.gdn_prefill_backend = _resolve_gdn_prefill_backend(vllm_config)
 
         if self.speculative_config:

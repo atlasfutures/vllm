@@ -84,7 +84,7 @@ logger = init_logger(__name__)
 
 def _resolve_gdn_prefill_backend(
     vllm_config: VllmConfig,
-) -> tuple[str, Literal["triton", "flashinfer", "cutedsl"]]:
+) -> tuple[str, Literal["triton", "flashinfer", "cutedsl", "torch_reference"]]:
     """Resolve GDN prefill backend.
 
     FlashInfer's GDN prefill kernel is chosen when:
@@ -105,6 +105,9 @@ def _resolve_gdn_prefill_backend(
         else "auto"
     )
     backend = str(backend_cfg).strip().lower()
+
+    if backend == "torch_reference":
+        return backend, "torch_reference"
 
     if not current_platform.is_cuda():
         return backend, "triton"
@@ -146,6 +149,7 @@ def _log_gdn_backend_decision(
         "flashinfer": "FlashInfer",
         "cutedsl": "CuteDSL",
         "triton": "Triton/FLA",
+        "torch_reference": "Transformers Torch reference",
     }[active_backend]
     logger.info_once(
         "Using %s GDN prefill kernel (requested=%s, head_k_dim=%s).",
@@ -209,6 +213,63 @@ def fi_chunk_gated_delta_rule(
         return result.unsqueeze(0), None
 
 
+def torch_reference_chunk_gated_delta_rule(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    initial_state: torch.Tensor | None,
+    output_final_state: bool,
+    cu_seqlens: torch.Tensor | None = None,
+    use_qk_l2norm_in_kernel: bool = True,
+):
+    from transformers.models.qwen3_5.modeling_qwen3_5 import (
+        torch_chunk_gated_delta_rule,
+    )
+
+    def run_segment(
+        start: int,
+        end: int,
+        state: torch.Tensor | None,
+    ):
+        state_kv = None if state is None else state.transpose(-1, -2)
+        output, final_state = torch_chunk_gated_delta_rule(
+            q[:, start:end],
+            k[:, start:end],
+            v[:, start:end],
+            g[:, start:end],
+            beta[:, start:end],
+            initial_state=state_kv,
+            output_final_state=output_final_state,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        )
+        if final_state is not None:
+            final_state = final_state.transpose(-1, -2)
+        return output, final_state
+
+    if cu_seqlens is None:
+        return run_segment(0, q.shape[1], initial_state)
+
+    offsets = cu_seqlens.tolist()
+    if q.shape[0] != 1:
+        raise ValueError("packed Torch-reference GDN expects batch size 1")
+    if initial_state is not None and initial_state.shape[0] != len(offsets) - 1:
+        raise ValueError("packed Torch-reference GDN state count mismatch")
+
+    outputs = []
+    final_states = []
+    for index, (start, end) in enumerate(zip(offsets, offsets[1:])):
+        state = None if initial_state is None else initial_state[index : index + 1]
+        output, final_state = run_segment(start, end, state)
+        outputs.append(output)
+        if final_state is not None:
+            final_states.append(final_state)
+    output = torch.cat(outputs, dim=1)
+    final_state = torch.cat(final_states) if final_states else None
+    return output, final_state
+
+
 @CustomOp.register("chunk_gated_delta_rule")
 class ChunkGatedDeltaRule(CustomOp):
     def __init__(self) -> None:
@@ -229,6 +290,8 @@ class ChunkGatedDeltaRule(CustomOp):
             self._forward_method = self.forward_cuda
         elif active_backend == "cutedsl":
             self._forward_method = self.forward_cutedsl
+        elif active_backend == "torch_reference":
+            self._forward_method = self.forward_torch_reference
         else:
             self._forward_method = self.forward_native
 
@@ -293,6 +356,38 @@ class ChunkGatedDeltaRule(CustomOp):
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
             core_attn_out=core_attn_out,
         )
+
+    def forward_torch_reference(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        initial_state: torch.Tensor,
+        output_final_state: bool,
+        cu_seqlens: torch.Tensor | None = None,
+        chunk_indices: torch.Tensor | None = None,
+        chunk_offsets: torch.Tensor | None = None,
+        use_qk_l2norm_in_kernel: bool = True,
+        core_attn_out: torch.Tensor | None = None,
+    ):
+        del chunk_indices, chunk_offsets
+        output, final_state = torch_reference_chunk_gated_delta_rule(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            cu_seqlens=cu_seqlens,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        )
+        if core_attn_out is not None:
+            output_flat = output.squeeze(0).reshape(-1)
+            core_attn_out.reshape(-1)[: output_flat.numel()].copy_(output_flat)
+        return output, final_state
 
     def forward_cutedsl(
         self,
