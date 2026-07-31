@@ -7,6 +7,7 @@ from typing import Literal
 import torch
 from einops import rearrange
 from torch import nn
+from torch.nn import functional as F
 
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
@@ -268,6 +269,40 @@ def torch_reference_chunk_gated_delta_rule(
     output = torch.cat(outputs, dim=1)
     final_state = torch.cat(final_states) if final_states else None
     return output, final_state
+
+
+def torch_reference_post_conv_prep(
+    conv_output: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    num_k_heads: int,
+    num_v_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+):
+    """Match the Transformers Qwen3.5 post-convolution preparation path."""
+    key_dim = num_k_heads * head_k_dim
+    value_dim = num_v_heads * head_v_dim
+    query, key, value = torch.split(
+        conv_output,
+        [key_dim, key_dim, value_dim],
+        dim=-1,
+    )
+    query = query.reshape(1, -1, num_k_heads, head_k_dim)
+    key = key.reshape(1, -1, num_k_heads, head_k_dim)
+    value = value.reshape(1, -1, num_v_heads, head_v_dim)
+
+    beta = b.sigmoid().unsqueeze(0)
+    g = (-A_log.float().exp() * F.softplus(a.float() + dt_bias)).unsqueeze(0)
+
+    heads_per_group = num_v_heads // num_k_heads
+    if heads_per_group > 1:
+        query = query.repeat_interleave(heads_per_group, dim=2)
+        key = key.repeat_interleave(heads_per_group, dim=2)
+
+    return query, key, value, g, beta
 
 
 @CustomOp.register("chunk_gated_delta_rule")
@@ -879,18 +914,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         z_shape_og = z.shape
         core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
         z = z.reshape(-1, z.shape[-1])
-        if self.gdn_prefill_backend == "torch_reference":
-            input_dtype = core_attn_out.dtype
-            core_attn_out = core_attn_out.float()
-            variance = core_attn_out.pow(2).mean(-1, keepdim=True)
-            core_attn_out = core_attn_out * torch.rsqrt(
-                variance + self.layer_norm_epsilon
-            )
-            core_attn_out = self.norm.weight * core_attn_out.to(input_dtype)
-            core_attn_out = core_attn_out * torch.nn.functional.silu(z.float())
-            core_attn_out = core_attn_out.to(input_dtype)
-        else:
-            core_attn_out = self.norm(core_attn_out, z)
+        core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
         output, _ = self.out_proj(core_attn_out)
@@ -1445,29 +1469,48 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 a_prefill = a_non_spec
                 b_prefill = b_non_spec
 
-            (
-                query_non_spec,
-                key_non_spec,
-                value_non_spec,
-                g_non_spec,
-                beta_non_spec,
-            ) = fused_post_conv_prep(
-                conv_output=conv_output_prefill,
-                a=a_prefill,
-                b=b_prefill,
-                A_log=self.A_log,
-                dt_bias=self.dt_bias,
-                num_k_heads=self.num_k_heads // self.tp_size,
-                head_k_dim=self.head_k_dim,
-                head_v_dim=self.head_v_dim,
-                apply_l2norm=True,
-                output_g_exp=False,
-            )
-            query_non_spec = query_non_spec.unsqueeze(0)
-            key_non_spec = key_non_spec.unsqueeze(0)
-            value_non_spec = value_non_spec.unsqueeze(0)
-            g_non_spec = g_non_spec.unsqueeze(0)
-            beta_non_spec = beta_non_spec.unsqueeze(0)
+            if self.gdn_prefill_backend == "torch_reference":
+                (
+                    query_non_spec,
+                    key_non_spec,
+                    value_non_spec,
+                    g_non_spec,
+                    beta_non_spec,
+                ) = torch_reference_post_conv_prep(
+                    conv_output=conv_output_prefill,
+                    a=a_prefill,
+                    b=b_prefill,
+                    A_log=self.A_log,
+                    dt_bias=self.dt_bias,
+                    num_k_heads=self.num_k_heads // self.tp_size,
+                    num_v_heads=self.num_v_heads // self.tp_size,
+                    head_k_dim=self.head_k_dim,
+                    head_v_dim=self.head_v_dim,
+                )
+            else:
+                (
+                    query_non_spec,
+                    key_non_spec,
+                    value_non_spec,
+                    g_non_spec,
+                    beta_non_spec,
+                ) = fused_post_conv_prep(
+                    conv_output=conv_output_prefill,
+                    a=a_prefill,
+                    b=b_prefill,
+                    A_log=self.A_log,
+                    dt_bias=self.dt_bias,
+                    num_k_heads=self.num_k_heads // self.tp_size,
+                    head_k_dim=self.head_k_dim,
+                    head_v_dim=self.head_v_dim,
+                    apply_l2norm=True,
+                    output_g_exp=False,
+                )
+                query_non_spec = query_non_spec.unsqueeze(0)
+                key_non_spec = key_non_spec.unsqueeze(0)
+                value_non_spec = value_non_spec.unsqueeze(0)
+                g_non_spec = g_non_spec.unsqueeze(0)
+                beta_non_spec = beta_non_spec.unsqueeze(0)
         else:
             query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(
                 mixed_qkv_non_spec
@@ -1552,7 +1595,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 cu_seqlens=attn_metadata.prefill_query_start_loc,
                 chunk_indices=attn_metadata.chunk_indices,
                 chunk_offsets=attn_metadata.chunk_offsets,
-                use_qk_l2norm_in_kernel=False,
+                use_qk_l2norm_in_kernel=(self.gdn_prefill_backend == "torch_reference"),
             )
             # Init cache
             ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)

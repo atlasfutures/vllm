@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
+from torch.nn import functional as F
 
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     torch_reference_chunk_gated_delta_rule,
+    torch_reference_post_conv_prep,
 )
 
 
@@ -49,3 +51,53 @@ def test_torch_reference_preserves_packed_state_orientation() -> None:
 
     torch.testing.assert_close(output, torch.cat(expected_outputs, dim=1))
     torch.testing.assert_close(final_state, torch.cat(expected_states))
+
+
+def test_torch_reference_post_conv_prep_matches_transformers_order() -> None:
+    torch.manual_seed(1)
+    tokens = 5
+    num_k_heads = 2
+    num_v_heads = 4
+    head_k_dim = 3
+    head_v_dim = 6
+    key_dim = num_k_heads * head_k_dim
+    value_dim = num_v_heads * head_v_dim
+    conv_output = torch.randn(tokens, key_dim * 2 + value_dim)
+    a = torch.randn(tokens, num_v_heads)
+    b = torch.randn(tokens, num_v_heads)
+    A_log = torch.randn(num_v_heads)
+    dt_bias = torch.randn(num_v_heads)
+
+    query, key, value, g, beta = torch_reference_post_conv_prep(
+        conv_output,
+        a,
+        b,
+        A_log,
+        dt_bias,
+        num_k_heads,
+        num_v_heads,
+        head_k_dim,
+        head_v_dim,
+    )
+
+    expected_query, expected_key, expected_value = torch.split(
+        conv_output,
+        [key_dim, key_dim, value_dim],
+        dim=-1,
+    )
+    expected_query = expected_query.reshape(
+        1, tokens, num_k_heads, head_k_dim
+    ).repeat_interleave(num_v_heads // num_k_heads, dim=2)
+    expected_key = expected_key.reshape(
+        1, tokens, num_k_heads, head_k_dim
+    ).repeat_interleave(num_v_heads // num_k_heads, dim=2)
+    expected_value = expected_value.reshape(1, tokens, num_v_heads, head_v_dim)
+
+    torch.testing.assert_close(query, expected_query)
+    torch.testing.assert_close(key, expected_key)
+    torch.testing.assert_close(value, expected_value)
+    torch.testing.assert_close(beta, b.sigmoid().unsqueeze(0))
+    torch.testing.assert_close(
+        g,
+        (-A_log.float().exp() * F.softplus(a.float() + dt_bias)).unsqueeze(0),
+    )
