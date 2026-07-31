@@ -506,9 +506,19 @@ class AsyncLLM(EngineClient):
     def _validate_streaming_input_sampling_params(
         params: SamplingParams | PoolingParams,
     ):
+        if isinstance(params, PoolingParams):
+            if not params.retain_pooling_state:
+                raise ValueError(
+                    "Pooling input streaming requires retain_pooling_state=True."
+                )
+            if params.skip_reading_prefix_cache is False:
+                raise ValueError(
+                    "Pooling input streaming cannot read automatic prefix cache "
+                    "without a matching pooling accumulator."
+                )
+            return
         if (
-            not isinstance(params, SamplingParams)
-            or params.n > 1
+            params.n > 1
             or params.output_kind == RequestOutputKind.FINAL_ONLY
             or params.stop
         ):
@@ -804,7 +814,7 @@ class AsyncLLM(EngineClient):
 
     async def encode(
         self,
-        prompt: PromptType | EngineInput,
+        prompt: PromptType | EngineInput | AsyncGenerator[StreamingInput, None],
         pooling_params: PoolingParams,
         request_id: str,
         lora_request: LoRARequest | None = None,
@@ -847,6 +857,8 @@ class AsyncLLM(EngineClient):
                 # Note: drain queue without await if possible (avoids
                 # task switching under load which helps performance).
                 out = q.get_nowait() or await q.get()
+                if out is STREAM_FINISHED:
+                    break
                 assert isinstance(out, PoolingRequestOutput)
                 # Note: both OutputProcessor and EngineCore handle their
                 # own request cleanup based on finished.
@@ -855,7 +867,7 @@ class AsyncLLM(EngineClient):
 
         # If the request is disconnected by the client, generate()
         # is cancelled. So, we abort the request if we end up here.
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, GeneratorExit):
             if q is not None:
                 await self.abort(q.request_id, internal=True)
             if self.log_requests:

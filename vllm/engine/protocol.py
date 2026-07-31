@@ -87,7 +87,7 @@ class EngineClient(ABC):
     @abstractmethod
     def encode(
         self,
-        prompt: PromptType | EngineInput,
+        prompt: PromptType | EngineInput | AsyncGenerator[StreamingInput, None],
         pooling_params: PoolingParams,
         request_id: str,
         lora_request: LoRARequest | None = None,

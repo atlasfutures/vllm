@@ -68,6 +68,10 @@ class PoolingParams(
     late_interaction_params: LateInteractionParams | None = None
     extra_kwargs: dict[str, Any] | None = None
     output_kind: RequestOutputKind = RequestOutputKind.FINAL_ONLY
+    # Retain sequence-pooling accumulator state between resumable streaming
+    # input chunks. This is an engine-internal session primitive; ordinary
+    # pooling requests remain one-shot and clear their state after output.
+    retain_pooling_state: bool = False
 
     @property
     def all_parameters(self) -> list[str]:
@@ -109,6 +113,11 @@ class PoolingParams(
         pooler_config = model_config.pooler_config
         if pooler_config is None:
             return
+
+        if self.retain_pooling_state and pooler_config.seq_pooling_type != "MEAN":
+            raise ValueError(
+                "retain_pooling_state is supported only for sequence MEAN pooling"
+            )
 
         if self.task is None:
             raise ValueError("task must be set before merging parameters")

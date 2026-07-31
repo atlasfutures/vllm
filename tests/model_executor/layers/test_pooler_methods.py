@@ -232,6 +232,47 @@ class TestMeanPool:
         assert states[0].mean_pool_sum is None
         assert states[0].mean_pool_count == 0
 
+    def test_resumable_session_retains_cumulative_mean(self):
+        pooler = MeanPool()
+        state = PoolingStates()
+        params = PoolingParams(task="embed", retain_pooling_state=True)
+        first_hidden = torch.tensor([[1.0, 3.0], [3.0, 5.0]])
+
+        first = pooler(
+            first_hidden,
+            _make_metadata(
+                [2],
+                pooling_params=[params],
+                pooling_states=[state],
+            ),
+        )
+
+        assert isinstance(first, torch.Tensor)
+        assert torch.equal(first, torch.tensor([[2.0, 4.0]]))
+        assert torch.equal(state.mean_pool_sum, torch.tensor([4.0, 8.0]))
+        assert state.mean_pool_count == 2
+
+        second_hidden = torch.tensor([[5.0, 7.0], [7.0, 9.0]])
+        second = pooler(
+            second_hidden,
+            _make_metadata(
+                [4],
+                pooling_params=[params],
+                num_scheduled_tokens=[2],
+                seq_lens=[4],
+                pooling_states=[state],
+            ),
+        )
+
+        assert isinstance(second, torch.Tensor)
+        assert torch.equal(second, torch.tensor([[4.0, 6.0]]))
+        assert torch.equal(state.mean_pool_sum, torch.tensor([16.0, 24.0]))
+        assert state.mean_pool_count == 4
+
+        state.clean()
+        assert state.mean_pool_sum is None
+        assert state.mean_pool_count == 0
+
     def test_chunked_prefill_mixed_completion(self):
         pooler = MeanPool()
         states = [PoolingStates(), PoolingStates()]

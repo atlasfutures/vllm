@@ -535,6 +535,59 @@ def test_chunked_pooling_can_schedule_exact_max_model_len() -> None:
     assert request.num_computed_tokens == 16
 
 
+def test_resumable_pooling_session_reuses_live_kv_for_next_chunk() -> None:
+    scheduler = create_scheduler(
+        max_num_seqs=1,
+        max_num_batched_tokens=16,
+        max_model_len=32,
+        enable_chunked_prefill=True,
+    )
+    request = Request(
+        request_id="pool-session",
+        prompt_token_ids=[1, 2, 3],
+        sampling_params=None,
+        pooling_params=PoolingParams(
+            task="embed",
+            retain_pooling_state=True,
+        ),
+        resumable=True,
+    )
+    scheduler.add_request(request)
+
+    first = scheduler.schedule()
+    assert first.num_scheduled_tokens[request.request_id] == 3
+    first_outputs = scheduler.update_from_output(
+        first,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[torch.ones(4)],
+        ),
+    )
+
+    assert first_outputs[0].outputs[0].finished
+    assert request.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    assert request.num_computed_tokens == 3
+    assert request.request_id in scheduler.requests
+
+    continuation = Request(
+        request_id=request.request_id,
+        prompt_token_ids=[4, 5],
+        sampling_params=None,
+        pooling_params=request.pooling_params,
+        resumable=True,
+    )
+    scheduler.add_request(continuation)
+
+    assert request.prompt_token_ids == [1, 2, 3, 4, 5]
+    second = scheduler.schedule()
+    assert second.num_scheduled_tokens[request.request_id] == 2
+    assert second.scheduled_new_reqs[0].num_computed_tokens == 3
+
+
 def test_throttle_capacity_bound_guard_admits():
     """Saturation guard: if a cadence-aligned release step cannot drain the
     waiting prefill queue (it ran out of token budget), the throttle backs off on

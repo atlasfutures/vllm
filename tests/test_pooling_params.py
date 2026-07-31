@@ -231,3 +231,25 @@ def test_skip_reading_prefix_cache_default(task, seq_pooling_type, expected):
     )
 
     assert params.skip_reading_prefix_cache is expected
+
+
+def test_retained_pooling_state_requires_sequence_mean():
+    params = PoolingParams(task="embed", retain_pooling_state=True)
+    params.verify(
+        MockModelConfig(
+            pooler_config=PoolerConfig(
+                seq_pooling_type="MEAN",
+                tok_pooling_type="ALL",
+            )
+        )
+    )
+
+    with pytest.raises(ValueError, match="only for sequence MEAN"):
+        PoolingParams(task="embed", retain_pooling_state=True).verify(
+            MockModelConfig(
+                pooler_config=PoolerConfig(
+                    seq_pooling_type="LAST",
+                    tok_pooling_type="ALL",
+                )
+            )
+        )

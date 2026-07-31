@@ -147,9 +147,16 @@ class MeanPool(SequencePoolingMethod):
         # Fast path: every prompt is fully scheduled in this step and no
         # request carries accumulated state, i.e. the exact conditions under
         # which MEAN pooling ran before chunked accumulation existed.
-        if not pooling_cursor.is_partial_prefill() and all(
-            state.mean_pool_sum is None and state.mean_pool_count == 0
-            for state in pooling_metadata.pooling_states
+        if (
+            not pooling_cursor.is_partial_prefill()
+            and not any(
+                params.retain_pooling_state
+                for params in pooling_metadata.pooling_params
+            )
+            and all(
+                state.mean_pool_sum is None and state.mean_pool_count == 0
+                for state in pooling_metadata.pooling_states
+            )
         ):
             return self._forward_single_step(hidden_states, prompt_lens_cpu)
 
@@ -169,16 +176,21 @@ class MeanPool(SequencePoolingMethod):
         # Requests whose whole prompt arrived in this step; their means are
         # produced by a single batched division after the loop.
         single_step_indices: list[int] = []
-        for index, (state, scheduled, prompt_len, finished) in enumerate(
+        for index, (state, params, scheduled, prompt_len, finished) in enumerate(
             zip(
                 pooling_metadata.pooling_states,
+                pooling_metadata.pooling_params,
                 pooling_cursor.num_scheduled_tokens_cpu,
                 prompt_lens_cpu,
                 pooling_cursor.is_finished(),
             )
         ):
             chunk_sum = chunk_sums[index]
-            if state.mean_pool_sum is None and finished:
+            if (
+                state.mean_pool_sum is None
+                and finished
+                and not params.retain_pooling_state
+            ):
                 # Single-step request inside a mixed batch: its whole prompt is
                 # in this step's segment sum, so it needs no accumulator at
                 # all. Defer the division to one batched op below, keeping the
@@ -225,7 +237,8 @@ class MeanPool(SequencePoolingMethod):
                 raise RuntimeError("MEAN pooling requires at least one token")
 
             output_list.append(state.mean_pool_sum / state.mean_pool_count)
-            state.clean()
+            if not params.retain_pooling_state:
+                state.clean()
 
         if single_step_indices:
             # One division for every request that completed in this step, so a
