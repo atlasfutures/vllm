@@ -879,7 +879,18 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         z_shape_og = z.shape
         core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
         z = z.reshape(-1, z.shape[-1])
-        core_attn_out = self.norm(core_attn_out, z)
+        if self.gdn_prefill_backend == "torch_reference":
+            input_dtype = core_attn_out.dtype
+            core_attn_out = core_attn_out.float()
+            variance = core_attn_out.pow(2).mean(-1, keepdim=True)
+            core_attn_out = core_attn_out * torch.rsqrt(
+                variance + self.layer_norm_epsilon
+            )
+            core_attn_out = self.norm.weight * core_attn_out.to(input_dtype)
+            core_attn_out = core_attn_out * torch.nn.functional.silu(z.float())
+            core_attn_out = core_attn_out.to(input_dtype)
+        else:
+            core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
         output, _ = self.out_proj(core_attn_out)
