@@ -59,25 +59,66 @@ logger = init_logger(__name__)
 
 @dataclass(frozen=True)
 class SchedulerLoadSnapshot:
-    """Latest aggregate frontend view of scheduler occupancy."""
+    """Aggregate frontend view of current and peak scheduler occupancy."""
 
     num_requests_running: int = 0
     num_requests_waiting: int = 0
+    num_requests_running_max: int = 0
+    num_requests_waiting_max: int = 0
+    num_scheduler_updates: int = 0
 
 
-def _update_scheduler_load(
-    loads: dict[int, SchedulerLoadSnapshot],
-    engine_index: int,
-    scheduler_stats: SchedulerStats | None,
-) -> None:
-    if scheduler_stats is None:
-        return
-    loads[engine_index] = SchedulerLoadSnapshot(
-        num_requests_running=scheduler_stats.num_running_reqs,
-        num_requests_waiting=(
-            scheduler_stats.num_waiting_reqs + scheduler_stats.num_skipped_waiting_reqs
-        ),
-    )
+@dataclass(frozen=True)
+class _EngineSchedulerLoad:
+    num_requests_running: int
+    num_requests_waiting: int
+
+
+class _SchedulerLoadTracker:
+    def __init__(self) -> None:
+        self._loads: dict[int, _EngineSchedulerLoad] = {}
+        self._num_requests_running_max = 0
+        self._num_requests_waiting_max = 0
+        self._num_scheduler_updates = 0
+
+    def update(
+        self,
+        engine_index: int,
+        scheduler_stats: SchedulerStats | None,
+        managed_ranks: Iterable[int],
+    ) -> None:
+        if scheduler_stats is None:
+            return
+        self._loads[engine_index] = _EngineSchedulerLoad(
+            num_requests_running=scheduler_stats.num_running_reqs,
+            num_requests_waiting=(
+                scheduler_stats.num_waiting_reqs
+                + scheduler_stats.num_skipped_waiting_reqs
+            ),
+        )
+        current = self.snapshot(managed_ranks)
+        self._num_requests_running_max = max(
+            self._num_requests_running_max,
+            current.num_requests_running,
+        )
+        self._num_requests_waiting_max = max(
+            self._num_requests_waiting_max,
+            current.num_requests_waiting,
+        )
+        self._num_scheduler_updates += 1
+
+    def snapshot(self, managed_ranks: Iterable[int]) -> SchedulerLoadSnapshot:
+        ranks = set(managed_ranks)
+        loads = tuple(
+            load for engine_index, load in self._loads.items() if engine_index in ranks
+        )
+        return SchedulerLoadSnapshot(
+            num_requests_running=sum(load.num_requests_running for load in loads),
+            num_requests_waiting=sum(load.num_requests_waiting for load in loads),
+            num_requests_running_max=self._num_requests_running_max,
+            num_requests_waiting_max=self._num_requests_waiting_max,
+            num_scheduler_updates=self._num_scheduler_updates,
+        )
 
 
 class InputStreamError(Exception):
@@ -167,7 +208,7 @@ class AsyncLLM(EngineClient):
             stream_interval=self.vllm_config.scheduler_config.stream_interval,
             tracing_enabled=tracing_endpoint is not None,
         )
-        self._scheduler_load_by_engine: dict[int, SchedulerLoadSnapshot] = {}
+        self._scheduler_load_tracker = _SchedulerLoadTracker()
 
         # EngineCore (starts the engine in background process).
         self.engine_core = EngineCoreClient.make_async_mp_client(
@@ -687,7 +728,7 @@ class AsyncLLM(EngineClient):
         # object, or else it won't be garbage collected and cleaned up properly.
         engine_core = self.engine_core
         output_processor = self.output_processor
-        scheduler_load_by_engine = self._scheduler_load_by_engine
+        scheduler_load_tracker = self._scheduler_load_tracker
         log_stats = self.log_stats
         # We use a mutable list for logger_manager so that it can be updated
         # during elastic EP scaling (see scale_elastic_ep) without creating
@@ -733,10 +774,10 @@ class AsyncLLM(EngineClient):
                             )
 
                     output_processor.update_scheduler_stats(outputs.scheduler_stats)
-                    _update_scheduler_load(
-                        scheduler_load_by_engine,
+                    scheduler_load_tracker.update(
                         outputs.engine_index,
                         outputs.scheduler_stats,
+                        engine_core.engine_ranks_managed,
                     )
 
                     # 4) Logging.
@@ -757,16 +798,8 @@ class AsyncLLM(EngineClient):
 
     def get_scheduler_load(self) -> SchedulerLoadSnapshot:
         """Return the last reported scheduler occupancy without scraping metrics."""
-        managed_ranks = set(self.engine_core.engine_ranks_managed)
-        loads = (
-            load
-            for engine_index, load in self._scheduler_load_by_engine.items()
-            if engine_index in managed_ranks
-        )
-        totals = tuple(loads)
-        return SchedulerLoadSnapshot(
-            num_requests_running=sum(load.num_requests_running for load in totals),
-            num_requests_waiting=sum(load.num_requests_waiting for load in totals),
+        return self._scheduler_load_tracker.snapshot(
+            self.engine_core.engine_ranks_managed
         )
 
     async def abort(

@@ -14,7 +14,7 @@ from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.v1.engine.async_llm import (
     AsyncLLM,
     SchedulerLoadSnapshot,
-    _update_scheduler_load,
+    _SchedulerLoadTracker,
 )
 from vllm.v1.engine.output_processor import RequestOutputCollector
 from vllm.v1.metrics.stats import SchedulerStats
@@ -220,28 +220,33 @@ async def test_pooling_stream_params_do_not_require_generation_skip_clone():
     )
 
 
-def test_scheduler_load_snapshot_aggregates_latest_engine_reports() -> None:
-    loads: dict[int, SchedulerLoadSnapshot] = {}
-    _update_scheduler_load(
-        loads,
+def test_scheduler_load_snapshot_preserves_aggregate_process_peaks() -> None:
+    tracker = _SchedulerLoadTracker()
+    tracker.update(
         0,
         SchedulerStats(
             num_running_reqs=2,
             num_waiting_reqs=3,
             num_skipped_waiting_reqs=1,
         ),
+        [0, 1],
     )
-    _update_scheduler_load(
-        loads,
+    tracker.update(
         1,
         SchedulerStats(num_running_reqs=4, num_waiting_reqs=5),
+        [0, 1],
     )
+    tracker.update(0, SchedulerStats(), [0, 1])
+    tracker.update(1, SchedulerStats(), [0, 1])
 
     llm = object.__new__(AsyncLLM)
-    llm._scheduler_load_by_engine = loads
+    llm._scheduler_load_tracker = tracker
     llm.engine_core = MagicMock(engine_ranks_managed=[0, 1])
 
     assert llm.get_scheduler_load() == SchedulerLoadSnapshot(
-        num_requests_running=6,
-        num_requests_waiting=9,
+        num_requests_running=0,
+        num_requests_waiting=0,
+        num_requests_running_max=6,
+        num_requests_waiting_max=9,
+        num_scheduler_updates=4,
     )
