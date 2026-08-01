@@ -59,12 +59,19 @@ logger = init_logger(__name__)
 
 @dataclass(frozen=True)
 class SchedulerLoadSnapshot:
-    """Aggregate frontend view of current and peak scheduler occupancy."""
+    """Frontend view of scheduler occupancy and pre-execution batch width.
+
+    Running and waiting values are aggregate post-step occupancy across the
+    managed engine ranks. ``num_requests_scheduled_max`` is the largest number
+    of requests scheduled together by one engine iteration before execution.
+    All maxima and the update count span the lifetime of this frontend.
+    """
 
     num_requests_running: int = 0
     num_requests_waiting: int = 0
     num_requests_running_max: int = 0
     num_requests_waiting_max: int = 0
+    num_requests_scheduled_max: int = 0
     num_scheduler_updates: int = 0
 
 
@@ -79,6 +86,7 @@ class _SchedulerLoadTracker:
         self._loads: dict[int, _EngineSchedulerLoad] = {}
         self._num_requests_running_max = 0
         self._num_requests_waiting_max = 0
+        self._num_requests_scheduled_max = 0
         self._num_scheduler_updates = 0
 
     def update(
@@ -105,6 +113,12 @@ class _SchedulerLoadTracker:
             self._num_requests_waiting_max,
             current.num_requests_waiting,
         )
+        iteration = scheduler_stats.iteration_details
+        if iteration is not None and not iteration.is_dummy:
+            self._num_requests_scheduled_max = max(
+                self._num_requests_scheduled_max,
+                iteration.num_ctx_requests + iteration.num_generation_requests,
+            )
         self._num_scheduler_updates += 1
 
     def snapshot(self, managed_ranks: Iterable[int]) -> SchedulerLoadSnapshot:
@@ -117,6 +131,7 @@ class _SchedulerLoadTracker:
             num_requests_waiting=sum(load.num_requests_waiting for load in loads),
             num_requests_running_max=self._num_requests_running_max,
             num_requests_waiting_max=self._num_requests_waiting_max,
+            num_requests_scheduled_max=self._num_requests_scheduled_max,
             num_scheduler_updates=self._num_scheduler_updates,
         )
 

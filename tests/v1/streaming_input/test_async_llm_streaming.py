@@ -17,7 +17,7 @@ from vllm.v1.engine.async_llm import (
     _SchedulerLoadTracker,
 )
 from vllm.v1.engine.output_processor import RequestOutputCollector
-from vllm.v1.metrics.stats import SchedulerStats
+from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
 
 
 @pytest.fixture
@@ -228,6 +228,14 @@ def test_scheduler_load_snapshot_preserves_aggregate_process_peaks() -> None:
             num_running_reqs=2,
             num_waiting_reqs=3,
             num_skipped_waiting_reqs=1,
+            iteration_details=SchedulerIterationDetails(
+                iteration_index=0,
+                num_ctx_requests=4,
+                num_ctx_tokens=32,
+                num_generation_requests=2,
+                num_generation_tokens=2,
+                elapsed_ms=1.0,
+            ),
         ),
         [0, 1],
     )
@@ -248,5 +256,6 @@ def test_scheduler_load_snapshot_preserves_aggregate_process_peaks() -> None:
         num_requests_waiting=0,
         num_requests_running_max=6,
         num_requests_waiting_max=9,
+        num_requests_scheduled_max=6,
         num_scheduler_updates=4,
     )
