@@ -7,6 +7,7 @@ import time
 import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -51,9 +52,32 @@ from vllm.v1.metrics.loggers import (
     load_stat_logger_plugin_factories,
 )
 from vllm.v1.metrics.prometheus import shutdown_prometheus
-from vllm.v1.metrics.stats import IterationStats
+from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 logger = init_logger(__name__)
+
+
+@dataclass(frozen=True)
+class SchedulerLoadSnapshot:
+    """Latest aggregate frontend view of scheduler occupancy."""
+
+    num_requests_running: int = 0
+    num_requests_waiting: int = 0
+
+
+def _update_scheduler_load(
+    loads: dict[int, SchedulerLoadSnapshot],
+    engine_index: int,
+    scheduler_stats: SchedulerStats | None,
+) -> None:
+    if scheduler_stats is None:
+        return
+    loads[engine_index] = SchedulerLoadSnapshot(
+        num_requests_running=scheduler_stats.num_running_reqs,
+        num_requests_waiting=(
+            scheduler_stats.num_waiting_reqs + scheduler_stats.num_skipped_waiting_reqs
+        ),
+    )
 
 
 class InputStreamError(Exception):
@@ -143,6 +167,7 @@ class AsyncLLM(EngineClient):
             stream_interval=self.vllm_config.scheduler_config.stream_interval,
             tracing_enabled=tracing_endpoint is not None,
         )
+        self._scheduler_load_by_engine: dict[int, SchedulerLoadSnapshot] = {}
 
         # EngineCore (starts the engine in background process).
         self.engine_core = EngineCoreClient.make_async_mp_client(
@@ -662,6 +687,7 @@ class AsyncLLM(EngineClient):
         # object, or else it won't be garbage collected and cleaned up properly.
         engine_core = self.engine_core
         output_processor = self.output_processor
+        scheduler_load_by_engine = self._scheduler_load_by_engine
         log_stats = self.log_stats
         # We use a mutable list for logger_manager so that it can be updated
         # during elastic EP scaling (see scale_elastic_ep) without creating
@@ -707,6 +733,11 @@ class AsyncLLM(EngineClient):
                             )
 
                     output_processor.update_scheduler_stats(outputs.scheduler_stats)
+                    _update_scheduler_load(
+                        scheduler_load_by_engine,
+                        outputs.engine_index,
+                        outputs.scheduler_stats,
+                    )
 
                     # 4) Logging.
                     # TODO(rob): make into a coroutine and launch it in
@@ -723,6 +754,20 @@ class AsyncLLM(EngineClient):
                 output_processor.propagate_error(e)
 
         self.output_handler = asyncio.create_task(output_handler())
+
+    def get_scheduler_load(self) -> SchedulerLoadSnapshot:
+        """Return the last reported scheduler occupancy without scraping metrics."""
+        managed_ranks = set(self.engine_core.engine_ranks_managed)
+        loads = (
+            load
+            for engine_index, load in self._scheduler_load_by_engine.items()
+            if engine_index in managed_ranks
+        )
+        totals = tuple(loads)
+        return SchedulerLoadSnapshot(
+            num_requests_running=sum(load.num_requests_running for load in totals),
+            num_requests_waiting=sum(load.num_requests_waiting for load in totals),
+        )
 
     async def abort(
         self, request_id: str | Iterable[str], internal: bool = False

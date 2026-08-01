@@ -15,6 +15,7 @@ from vllm.outputs import (
     STREAM_FINISHED,
     CompletionOutput,
     PoolingOutput,
+    PoolingRequestMetrics,
     PoolingRequestOutput,
     RequestOutput,
 )
@@ -205,7 +206,7 @@ class RequestState:
         assert self.prompt_token_ids is not None
         self.prompt_len = len(self.prompt_token_ids)
         if self.stats is not None:
-            self.stats.arrival_time = update.arrival_time
+            self.stats = RequestStateStats(arrival_time=update.arrival_time)
         self.is_prefilling = True
 
     @classmethod
@@ -362,6 +363,7 @@ class RequestState:
                 num_cached_tokens=self.num_cached_tokens,
                 prompt_token_ids=prompt_token_ids,
                 finished=finished,
+                metrics=self._new_pooling_request_metrics(),
             )
         assert self.logprobs_processor is not None
         if self.output_kind == RequestOutputKind.DELTA:
@@ -383,6 +385,21 @@ class RequestState:
             num_cached_tokens=self.num_cached_tokens,
             num_cache_creation_tokens=self.num_cache_creation_tokens,
             metrics=self.stats,
+        )
+
+    def _new_pooling_request_metrics(self) -> PoolingRequestMetrics | None:
+        stats = self.stats
+        if (
+            stats is None
+            or stats.queued_ts <= 0.0
+            or stats.scheduled_ts <= 0.0
+            or stats.last_token_ts <= 0.0
+        ):
+            return None
+        return PoolingRequestMetrics(
+            queue_time=max(0.0, stats.scheduled_ts - stats.queued_ts),
+            inference_time=max(0.0, stats.last_token_ts - stats.scheduled_ts),
+            e2e_time=max(0.0, stats.first_token_latency),
         )
 
     def _new_completion_output(

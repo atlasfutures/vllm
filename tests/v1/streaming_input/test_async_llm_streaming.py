@@ -11,8 +11,13 @@ from vllm.engine.protocol import StreamingInput
 from vllm.outputs import RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import RequestOutputKind, SamplingParams
-from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.async_llm import (
+    AsyncLLM,
+    SchedulerLoadSnapshot,
+    _update_scheduler_load,
+)
 from vllm.v1.engine.output_processor import RequestOutputCollector
+from vllm.v1.metrics.stats import SchedulerStats
 
 
 @pytest.fixture
@@ -212,4 +217,31 @@ async def test_pooling_stream_params_do_not_require_generation_skip_clone():
         None,
         0,
         queue,
+    )
+
+
+def test_scheduler_load_snapshot_aggregates_latest_engine_reports() -> None:
+    loads: dict[int, SchedulerLoadSnapshot] = {}
+    _update_scheduler_load(
+        loads,
+        0,
+        SchedulerStats(
+            num_running_reqs=2,
+            num_waiting_reqs=3,
+            num_skipped_waiting_reqs=1,
+        ),
+    )
+    _update_scheduler_load(
+        loads,
+        1,
+        SchedulerStats(num_running_reqs=4, num_waiting_reqs=5),
+    )
+
+    llm = object.__new__(AsyncLLM)
+    llm._scheduler_load_by_engine = loads
+    llm.engine_core = MagicMock(engine_ranks_managed=[0, 1])
+
+    assert llm.get_scheduler_load() == SchedulerLoadSnapshot(
+        num_requests_running=6,
+        num_requests_waiting=9,
     )

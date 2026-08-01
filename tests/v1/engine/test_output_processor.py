@@ -5,6 +5,7 @@ import math
 import time
 
 import pytest
+import torch
 
 from tests.v1.engine.utils import (
     NUM_PROMPT_LOGPROBS_UNDER_TEST,
@@ -16,18 +17,90 @@ from tests.v1.engine.utils import (
 from vllm import PoolingParams
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
-from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.outputs import CompletionOutput, PoolingRequestMetrics, RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine import (
     EngineCoreEvent,
     EngineCoreEventType,
+    EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreRequest,
     FinishReason,
 )
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+
+
+def _retained_pooling_request(
+    prompt_token_ids: list[int],
+    arrival_time: float,
+) -> EngineCoreRequest:
+    return EngineCoreRequest(
+        request_id="retained-pooling-internal",
+        external_req_id="retained-pooling",
+        prompt_token_ids=prompt_token_ids,
+        mm_features=None,
+        arrival_time=arrival_time,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=None,
+        pooling_params=PoolingParams(task="embed", retain_pooling_state=True),
+        resumable=True,
+    )
+
+
+def _finished_pooling_output(
+    *,
+    queued_at: float,
+    scheduled_at: float,
+) -> EngineCoreOutput:
+    return EngineCoreOutput(
+        request_id="retained-pooling-internal",
+        new_token_ids=[],
+        pooling_output=torch.tensor([1.0]),
+        finish_reason=FinishReason.STOP,
+        events=[
+            EngineCoreEvent.new_event(EngineCoreEventType.QUEUED, queued_at),
+            EngineCoreEvent.new_event(EngineCoreEventType.SCHEDULED, scheduled_at),
+        ],
+    )
+
+
+def test_retained_pooling_reports_fresh_metrics_for_each_append() -> None:
+    output_processor = OutputProcessor(tokenizer=None, log_stats=True)
+    output_processor.add_request(_retained_pooling_request([1, 2], 10.0), None)
+
+    first_stats = IterationStats()
+    first_stats.iteration_timestamp = 14.0
+    first = output_processor.process_outputs(
+        [_finished_pooling_output(queued_at=10.0, scheduled_at=11.0)],
+        engine_core_timestamp=13.0,
+        iteration_stats=first_stats,
+    ).request_outputs[0]
+
+    output_processor.add_request(_retained_pooling_request([3], 20.0), None)
+    second_stats = IterationStats()
+    second_stats.iteration_timestamp = 26.0
+    second = output_processor.process_outputs(
+        [_finished_pooling_output(queued_at=30.0, scheduled_at=31.0)],
+        engine_core_timestamp=35.0,
+        iteration_stats=second_stats,
+    ).request_outputs[0]
+
+    assert first.finished is False
+    assert first.metrics == PoolingRequestMetrics(
+        queue_time=1.0,
+        inference_time=2.0,
+        e2e_time=4.0,
+    )
+    assert second.finished is False
+    assert second.metrics == PoolingRequestMetrics(
+        queue_time=1.0,
+        inference_time=4.0,
+        e2e_time=6.0,
+    )
 
 
 def _ref_convert_id_to_token(

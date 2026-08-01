@@ -210,6 +210,15 @@ STREAM_FINISHED = RequestOutput(
 _O = TypeVar("_O", default=PoolingOutput)
 
 
+@dataclass(frozen=True)
+class PoolingRequestMetrics:
+    """Completed lifecycle timings for one pooling input."""
+
+    queue_time: float
+    inference_time: float
+    e2e_time: float
+
+
 class PoolingRequestOutput(Generic[_O]):
     """
     The output data of a pooling request to the LLM.
@@ -220,6 +229,7 @@ class PoolingRequestOutput(Generic[_O]):
         prompt_token_ids (list[int]): A list of token IDs used in the prompt.
         num_cached_tokens: The number of tokens with prefix cache hit.
         finished (bool): A flag indicating whether the pooling is completed.
+        metrics: Completed lifecycle timings for this pooling input.
     """
 
     def __init__(
@@ -229,12 +239,14 @@ class PoolingRequestOutput(Generic[_O]):
         prompt_token_ids: list[int],
         num_cached_tokens: int,
         finished: bool,
+        metrics: PoolingRequestMetrics | None = None,
     ):
         self.request_id = request_id
         self.prompt_token_ids = prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
         self.finished = finished
         self.outputs = outputs
+        self.metrics = metrics
 
     def __repr__(self):
         return (
@@ -242,7 +254,8 @@ class PoolingRequestOutput(Generic[_O]):
             f"outputs={self.outputs!r}, "
             f"prompt_token_ids={self.prompt_token_ids}, "
             f"num_cached_tokens={self.num_cached_tokens}, "
-            f"finished={self.finished})"
+            f"finished={self.finished}, "
+            f"metrics={self.metrics})"
         )
 
 
@@ -282,6 +295,7 @@ class EmbeddingRequestOutput(PoolingRequestOutput[EmbeddingOutput]):
             prompt_token_ids=request_output.prompt_token_ids,
             num_cached_tokens=request_output.num_cached_tokens,
             finished=request_output.finished,
+            metrics=request_output.metrics,
         )
 
 
@@ -322,6 +336,7 @@ class ClassificationRequestOutput(PoolingRequestOutput[ClassificationOutput]):
             prompt_token_ids=request_output.prompt_token_ids,
             num_cached_tokens=request_output.num_cached_tokens,
             finished=request_output.finished,
+            metrics=request_output.metrics,
         )
 
 
@@ -359,4 +374,5 @@ class ScoringRequestOutput(PoolingRequestOutput[ScoringOutput]):
             prompt_token_ids=request_output.prompt_token_ids,
             num_cached_tokens=request_output.num_cached_tokens,
             finished=request_output.finished,
+            metrics=request_output.metrics,
         )
