@@ -16,7 +16,7 @@ logger = init_logger(__name__)
 SequencePoolingType = Literal["CLS", "LAST", "MEAN"]
 SEQ_POOLING_TYPES: tuple[SequencePoolingType, ...] = get_args(SequencePoolingType)
 
-TokenPoolingType = Literal["ALL", "STEP"]
+TokenPoolingType = Literal["ALL", "STEP", "GATHER"]
 TOK_POOLING_TYPES: tuple[TokenPoolingType, ...] = get_args(TokenPoolingType)
 
 POOLER_CONFIG_LOG_FIELDS = (

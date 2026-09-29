@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
+from bisect import bisect_left
 from collections.abc import Set
 from typing import TypeAlias
 
@@ -122,10 +123,97 @@ class StepPool(AllPool):
         return pooled_data
 
 
+class GatherPool(TokenPoolingMethod):
+    """Final hidden states at the token positions a request names.
+
+    `PoolingParams.readout_offsets` are absolute positions in the request's
+    token sequence; for a retained streaming session that is the concatenation
+    of every input appended so far, so a position never changes meaning as the
+    session grows. Every offset must lie inside the input being processed
+    (`[tokens before this input, tokens after it)`); `None` selects the input's
+    last token. The output for an input is `[len(offsets), hidden]`, in offset
+    order.
+
+    Rows are selected from each scheduled chunk as it runs and only those rows
+    are kept, so chunked prefill needs no all-token cache. A preempted request
+    recomputes from position 0 with its state cleaned and gathers again.
+    """
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        pooling_metadata: PoolingMetadata,
+    ) -> list[TokenPoolingMethodOutputItem]:
+        pooling_cursor = pooling_metadata.get_pooling_cursor()
+        scheduled = pooling_cursor.num_scheduled_tokens_cpu.tolist()
+        seq_lens = pooling_cursor.seq_lens_cpu.tolist()
+        prompt_lens = pooling_cursor.prompt_lens_cpu.tolist()
+        params_list = pooling_metadata.pooling_params
+
+        # One index_select for the whole batch; indices are built on the CPU
+        # from CPU-resident counts, so selection needs no device sync.
+        row_index: list[int] = []
+        spans: list[tuple[int, int]] = []
+        first_row = 0
+        for params, num_scheduled, seq_len, prompt_len in zip(
+            params_list, scheduled, seq_lens, prompt_lens
+        ):
+            chunk_start = seq_len - num_scheduled
+            offsets = _readout_offsets(params, prompt_len)
+            low = bisect_left(offsets, chunk_start)
+            high = bisect_left(offsets, seq_len)
+            begin = len(row_index)
+            row_index.extend(
+                first_row + offset - chunk_start for offset in offsets[low:high]
+            )
+            spans.append((begin, len(row_index)))
+            first_row += num_scheduled
+
+        gathered = None
+        if row_index:
+            index = torch.tensor(row_index, dtype=torch.long).to(
+                hidden_states.device, non_blocking=True
+            )
+            gathered = hidden_states.index_select(0, index)
+
+        output_list: list[TokenPoolingMethodOutputItem] = []
+        for state, params, (begin, end), finished, prompt_len in zip(
+            pooling_metadata.pooling_states,
+            params_list,
+            spans,
+            pooling_cursor.is_finished().tolist(),
+            prompt_lens,
+        ):
+            if end > begin:
+                assert gathered is not None
+                state.hidden_states_cache.append(gathered[begin:end])
+            if not finished:
+                output_list.append(None)
+                continue
+            rows = state.hidden_states_cache
+            expected = len(_readout_offsets(params, prompt_len))
+            got = sum(row.shape[0] for row in rows)
+            state.clean()
+            if got != expected:
+                raise RuntimeError(
+                    f"GATHER pooling collected {got} of {expected} readout rows; "
+                    "readout_offsets must lie inside the current input"
+                )
+            output_list.append(rows[0] if len(rows) == 1 else torch.cat(rows, dim=0))
+        return output_list
+
+
+def _readout_offsets(params, prompt_len: int) -> list[int]:
+    offsets = params.readout_offsets
+    return [prompt_len - 1] if offsets is None else offsets
+
+
 def get_tok_pooling_method(pooling_type: TokenPoolingType | str):
     if pooling_type == "ALL":
         return AllPool()
     if pooling_type == "STEP":
         return StepPool()
+    if pooling_type == "GATHER":
+        return GatherPool()
 
     raise NotImplementedError(f"Unknown tokenwise pooling type: {pooling_type!r}")

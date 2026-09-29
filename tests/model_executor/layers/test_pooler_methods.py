@@ -16,6 +16,7 @@ from vllm.model_executor.layers.pooler.seqwise.methods import (
 )
 from vllm.model_executor.layers.pooler.tokwise.methods import (
     AllPool,
+    GatherPool,
     StepPool,
     get_tok_pooling_method,
 )
@@ -681,3 +682,103 @@ class TestGetTokPoolingMethod:
     def test_unknown_raises(self):
         with pytest.raises(NotImplementedError, match="UNKNOWN"):
             get_tok_pooling_method("UNKNOWN")
+
+
+# ---------------------------------------------------------------------------
+# GatherPool
+# ---------------------------------------------------------------------------
+def _gather_params(offsets: list[int] | None) -> PoolingParams:
+    return PoolingParams(task="token_embed", readout_offsets=offsets)
+
+
+def _run_chunks(
+    hidden: torch.Tensor,
+    offsets: list[int] | None,
+    chunks: list[int],
+    *,
+    input_start: int = 0,
+    state: PoolingStates | None = None,
+):
+    """Feed one request's positions [input_start, len(hidden)) chunk by chunk."""
+    state = PoolingStates() if state is None else state
+    prompt_len = hidden.shape[0]
+    seq_len = input_start
+    outputs = []
+    for size in chunks:
+        chunk = hidden[seq_len : seq_len + size]
+        seq_len += size
+        metadata = _make_metadata(
+            [prompt_len],
+            tasks=["token_embed"],
+            pooling_params=[_gather_params(offsets)],
+            num_scheduled_tokens=[size],
+            seq_lens=[seq_len],
+            pooling_states=[state],
+        )
+        outputs.append(GatherPool()(chunk, metadata)[0])
+    assert seq_len == prompt_len
+    return outputs, state
+
+
+class TestGatherPool:
+    def test_factory(self):
+        assert isinstance(get_tok_pooling_method("GATHER"), GatherPool)
+
+    def test_single_step_batch(self):
+        hidden = torch.arange(20, dtype=torch.float32).reshape(10, 2)
+        metadata = _make_metadata(
+            [4, 6],
+            tasks=["token_embed", "token_embed"],
+            pooling_params=[_gather_params([0, 3]), _gather_params([2, 5])],
+        )
+        out = GatherPool()(hidden, metadata)
+        assert torch.equal(out[0], hidden[[0, 3]])
+        assert torch.equal(out[1], hidden[[4 + 2, 4 + 5]])
+
+    def test_none_selects_last_token(self):
+        hidden = torch.randn(5, 3)
+        metadata = _make_metadata(
+            [5], tasks=["token_embed"], pooling_params=[_gather_params(None)]
+        )
+        assert torch.equal(GatherPool()(hidden, metadata)[0], hidden[[4]])
+
+    @pytest.mark.parametrize("chunks", [[9], [4, 5], [1, 3, 3, 2], [1] * 9])
+    def test_chunked_prefill_matches_single_pass(self, chunks):
+        hidden = torch.randn(9, 4)
+        offsets = [0, 3, 4, 8]
+        outputs, state = _run_chunks(hidden, offsets, chunks)
+        assert all(o is None for o in outputs[:-1])
+        assert torch.equal(outputs[-1], hidden[offsets])
+        assert state.hidden_states_cache == []
+
+    def test_retained_append_uses_absolute_positions(self):
+        hidden = torch.randn(10, 4)
+        # The session already holds 6 tokens; this input is positions [6, 10).
+        outputs, _ = _run_chunks(hidden, [7, 9], [3, 1], input_start=6)
+        assert torch.equal(outputs[-1], hidden[[7, 9]])
+        outputs, _ = _run_chunks(hidden, None, [4], input_start=6)
+        assert torch.equal(outputs[-1], hidden[[9]])
+
+    def test_preemption_recompute_gathers_again(self):
+        hidden = torch.randn(8, 4)
+        state = PoolingStates()
+        # First pass gathers position 2 in a 3-token chunk, then is preempted:
+        # the runner cleans the state and the request recomputes from 0.
+        metadata = _make_metadata(
+            [8],
+            tasks=["token_embed"],
+            pooling_params=[_gather_params([2, 6])],
+            num_scheduled_tokens=[3],
+            seq_lens=[3],
+            pooling_states=[state],
+        )
+        assert GatherPool()(hidden[:3], metadata)[0] is None
+        assert len(state.hidden_states_cache) == 1
+        state.clean()
+        outputs, _ = _run_chunks(hidden, [2, 6], [3, 5], state=state)
+        assert torch.equal(outputs[-1], hidden[[2, 6]])
+
+    def test_offset_outside_current_input_is_refused(self):
+        hidden = torch.randn(10, 4)
+        with pytest.raises(RuntimeError, match="collected 1 of 2"):
+            _run_chunks(hidden, [2, 7], [4], input_start=6)

@@ -17,6 +17,7 @@ from vllm.v1.engine.pooling_session import AsyncPoolingSession, PoolingSessionEr
 class _FakePoolingEngine:
     def __init__(self) -> None:
         self.appended: list[list[int]] = []
+        self.params: list[PoolingParams | None] = []
         self.input_finished = False
 
     async def _encode(
@@ -28,6 +29,7 @@ class _FakePoolingEngine:
         async for item in prompt:
             chunk = list(item.prompt["prompt_token_ids"])
             self.appended.append(chunk)
+            self.params.append(item.sampling_params)
             cumulative.extend(chunk)
             yield PoolingRequestOutput(
                 request_id=request_id,
@@ -111,4 +113,55 @@ def test_pooling_session_requires_retained_state() -> None:
             _FakePoolingEngine(),
             pooling_params=PoolingParams(task="embed"),
             request_id="session-4",
+        )
+
+
+def _gather(offsets: list[int] | None) -> PoolingParams:
+    return PoolingParams(
+        task="token_embed", retain_pooling_state=True, readout_offsets=offsets
+    )
+
+
+@pytest.mark.asyncio
+async def test_pooling_session_sends_per_input_readout_offsets() -> None:
+    engine = _FakePoolingEngine()
+    session = AsyncPoolingSession(
+        engine,
+        pooling_params=PoolingParams(task="token_embed", retain_pooling_state=True),
+        request_id="session-5",
+    )
+
+    await session.append(TokensPrompt(prompt_token_ids=[1, 2, 3]), _gather([0, 2]))
+    await session.append(TokensPrompt(prompt_token_ids=[4]))
+    await session.append(TokensPrompt(prompt_token_ids=[5, 6]), _gather([4, 5]))
+    await session.close()
+
+    assert [p and p.readout_offsets for p in engine.params] == [[0, 2], None, [4, 5]]
+    assert session.num_tokens == 6
+
+
+@pytest.mark.asyncio
+async def test_pooling_session_refuses_offsets_outside_the_input() -> None:
+    engine = _FakePoolingEngine()
+    session = AsyncPoolingSession(
+        engine,
+        pooling_params=PoolingParams(task="token_embed", retain_pooling_state=True),
+        request_id="session-6",
+    )
+    await session.append(TokensPrompt(prompt_token_ids=[1, 2, 3]), _gather([2]))
+
+    for offsets in ([2, 4], [5]):  # an earlier input's position; past the end
+        with pytest.raises(ValueError, match=r"\[3, 5\)"):
+            await session.append(TokensPrompt(prompt_token_ids=[4, 5]), _gather(offsets))
+
+    # The refusal reached no engine and left the session usable.
+    await session.append(TokensPrompt(prompt_token_ids=[4, 5]), _gather([3, 4]))
+    await session.close()
+    assert engine.appended == [[1, 2, 3], [4, 5]]
+
+
+def test_pooling_session_refuses_session_level_offsets() -> None:
+    with pytest.raises(ValueError, match="per input"):
+        AsyncPoolingSession(
+            _FakePoolingEngine(), pooling_params=_gather([0]), request_id="session-7"
         )

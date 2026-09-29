@@ -35,7 +35,9 @@ class StreamingInput:
     """
 
     prompt: EngineInput
-    sampling_params: SamplingParams | None = None
+    # PoolingParams for a retained pooling session's input (per-input
+    # pooling parameters such as GATHER readout offsets).
+    sampling_params: SamplingParams | PoolingParams | None = None
 
 
 class EngineClient(ABC):

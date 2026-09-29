@@ -1634,6 +1634,12 @@ class GPUModelRunner(
         req_state.prompt_embeds = new_req_data.prompt_embeds
         req_state.sampling_params = new_req_data.sampling_params
         req_state.pooling_params = new_req_data.pooling_params
+        if self.is_pooling_model and req_state.pooling_params is not None:
+            # Each streamed input may carry its own pooling parameters.
+            task = req_state.pooling_params.task
+            assert task is not None, "You did not set `task` in the API"
+            model = cast(VllmModelForPooling, self.get_model())
+            model.pooler.get_pooling_updates(task).apply(req_state.pooling_params)
         self.late_interaction_runner.register_request(req_id, req_state.pooling_params)
         req_state.block_ids = new_req_data.block_ids
         req_state.num_computed_tokens = new_req_data.num_computed_tokens
