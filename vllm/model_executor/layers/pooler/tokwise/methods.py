@@ -190,7 +190,7 @@ class GatherPool(TokenPoolingMethod):
             if not finished:
                 output_list.append(None)
                 continue
-            rows = state.hidden_states_cache
+            rows = list(state.hidden_states_cache)  # clean() clears in place
             expected = len(_readout_offsets(params, prompt_len))
             got = sum(row.shape[0] for row in rows)
             state.clean()
