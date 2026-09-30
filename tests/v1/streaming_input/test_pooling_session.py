@@ -27,7 +27,10 @@ class _FakePoolingEngine:
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         cumulative: list[int] = []
         async for item in prompt:
-            chunk = list(item.prompt["prompt_token_ids"])
+            prompt_ids = item.prompt
+            if isinstance(prompt_ids, dict):
+                prompt_ids = prompt_ids["prompt_token_ids"]
+            chunk = list(prompt_ids)
             self.appended.append(chunk)
             self.params.append(item.sampling_params)
             cumulative.extend(chunk)
@@ -152,7 +155,9 @@ async def test_pooling_session_refuses_offsets_outside_the_input() -> None:
 
     for offsets in ([2, 4], [5]):  # an earlier input's position; past the end
         with pytest.raises(ValueError, match=r"\[3, 5\)"):
-            await session.append(TokensPrompt(prompt_token_ids=[4, 5]), _gather(offsets))
+            await session.append(
+                TokensPrompt(prompt_token_ids=[4, 5]), _gather(offsets)
+            )
 
     # The refusal reached no engine and left the session usable.
     await session.append(TokensPrompt(prompt_token_ids=[4, 5]), _gather([3, 4]))
@@ -165,3 +170,33 @@ def test_pooling_session_refuses_session_level_offsets() -> None:
         AsyncPoolingSession(
             _FakePoolingEngine(), pooling_params=_gather([0]), request_id="session-7"
         )
+
+
+@pytest.mark.asyncio
+async def test_pooling_session_tracks_raw_token_list_prompts() -> None:
+    """A raw list[int] prompt has a known length, so later offsets stay usable."""
+    engine = _FakePoolingEngine()
+    session = AsyncPoolingSession(
+        engine,
+        pooling_params=PoolingParams(task="token_embed", retain_pooling_state=True),
+        request_id="session-8",
+    )
+    await session.append([1, 2, 3])
+    await session.append([4, 5], _gather([3, 4]))
+    await session.close()
+    assert session.num_tokens == 5
+
+
+@pytest.mark.asyncio
+async def test_pooling_session_refuses_offsets_after_a_multimodal_prompt() -> None:
+    """Multimodal preprocessing can change the token count, so offsets are refused."""
+    engine = _FakePoolingEngine()
+    session = AsyncPoolingSession(
+        engine,
+        pooling_params=PoolingParams(task="token_embed", retain_pooling_state=True),
+        request_id="session-9",
+    )
+    await session.append(TokensPrompt(prompt_token_ids=[1, 2], multi_modal_data={}))
+    with pytest.raises(ValueError, match="token-id prompts"):
+        await session.append(TokensPrompt(prompt_token_ids=[3]), _gather([2]))
+    await session.close()

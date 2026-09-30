@@ -220,6 +220,58 @@ async def test_pooling_stream_params_do_not_require_generation_skip_clone():
     )
 
 
+@pytest.mark.asyncio
+async def test_streamed_pooling_offsets_outside_their_input_are_refused():
+    """A streamed input's readout offsets must lie in its absolute positions; one
+    outside is refused before it is scheduled rather than failing in the worker."""
+    llm = MagicMock(spec=AsyncLLM)
+    llm.get_supported_tasks = AsyncMock(return_value={"token_embed"})
+    llm.model_config = MagicMock()
+    llm.input_processor = MagicMock()
+
+    def process_inputs(*, prompt, **_):
+        request = MagicMock()
+        request.request_id = "internal-gather-session"
+        request.prompt_token_ids = prompt["prompt_token_ids"]
+        request.prompt_embeds = None
+        return request
+
+    llm.input_processor.process_inputs.side_effect = process_inputs
+    llm._run_output_handler = MagicMock()
+    llm._add_request = AsyncMock()
+    llm._validate_streaming_input_sampling_params = (
+        AsyncLLM._validate_streaming_input_sampling_params
+    )
+    llm._add_streaming_input_request = AsyncLLM._add_streaming_input_request.__get__(
+        llm, AsyncLLM
+    )
+
+    def gather(offsets: list[int]) -> PoolingParams:
+        return PoolingParams(
+            task="token_embed", retain_pooling_state=True, readout_offsets=offsets
+        )
+
+    async def inputs() -> AsyncGenerator[StreamingInput, None]:
+        yield StreamingInput(
+            prompt={"prompt_token_ids": [1, 2, 3]}, sampling_params=gather([2])
+        )
+        # Position 1 belongs to the first input; this one spans [3, 5).
+        yield StreamingInput(
+            prompt={"prompt_token_ids": [4, 5]}, sampling_params=gather([1])
+        )
+
+    queue = await llm._add_streaming_input_request(
+        "gather-session",
+        inputs(),
+        PoolingParams(task="token_embed", retain_pooling_state=True),
+    )
+    await queue._input_stream_task
+
+    added = [call.args[0].prompt_token_ids for call in llm._add_request.await_args_list]
+    assert added == [[1, 2, 3], [0]]  # the first input, then the finish signal
+    assert "[3, 5)" in str(queue.output)
+
+
 def test_scheduler_load_snapshot_preserves_aggregate_process_peaks() -> None:
     tracker = _SchedulerLoadTracker()
     tracker.update(

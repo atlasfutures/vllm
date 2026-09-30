@@ -173,8 +173,12 @@ class AsyncPoolingSession:
 
 
 def _prompt_token_count(prompt: PromptType | EngineInput) -> int | None:
-    if isinstance(prompt, dict):
+    if isinstance(prompt, list) and all(type(t) is int for t in prompt):
+        return len(prompt)
+    if isinstance(prompt, dict) and "multi_modal_data" not in prompt:
+        # Multimodal preprocessing can change the token count, so the caller's
+        # ids do not give the engine's positions.
         token_ids = prompt.get("prompt_token_ids")
-        if token_ids is not None and "prompt_embeds" not in prompt:
+        if isinstance(token_ids, list) and "prompt_embeds" not in prompt:
             return len(token_ids)
     return None

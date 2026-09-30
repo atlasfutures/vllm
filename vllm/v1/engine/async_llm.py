@@ -546,6 +546,7 @@ class AsyncLLM(EngineClient):
 
         async def handle_inputs():
             cancelled = False
+            num_tokens = 0  # engine positions before the current input
             try:
                 async for input_chunk in input_stream:
                     sp = input_chunk.sampling_params
@@ -566,6 +567,19 @@ class AsyncLLM(EngineClient):
                         raise ValueError(
                             "prompt_embeds not supported for streaming inputs"
                         )
+                    input_len = len(req.prompt_token_ids or ())
+                    offsets = (
+                        sp.readout_offsets if isinstance(sp, PoolingParams) else None
+                    )
+                    if offsets and not (
+                        num_tokens <= offsets[0]
+                        and offsets[-1] < num_tokens + input_len
+                    ):
+                        raise ValueError(
+                            f"readout offsets must lie in this input's positions "
+                            f"[{num_tokens}, {num_tokens + input_len})"
+                        )
+                    num_tokens += input_len
                     prompt_text, _, _ = extract_prompt_components(
                         self.model_config, input_chunk.prompt
                     )
