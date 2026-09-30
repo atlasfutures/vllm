@@ -47,6 +47,11 @@ class AsyncPoolingSession:
             raise ValueError("pooling session request_id must be non-empty")
         if not pooling_params.retain_pooling_state:
             raise ValueError("pooling sessions require retain_pooling_state=True")
+        if pooling_params.readout_offsets is not None:
+            raise ValueError(
+                "readout_offsets are per input; pass them to append(), not to "
+                "the session"
+            )
         self.request_id = request_id
         self._input_queue: asyncio.Queue[StreamingInput | None] = asyncio.Queue(
             maxsize=1
@@ -55,6 +60,9 @@ class AsyncPoolingSession:
         self._append_lock = asyncio.Lock()
         self._closed = False
         self._started = False
+        # Tokens appended so far; None once an input's length is unknown
+        # (a text prompt), after which absolute readout offsets are refused.
+        self._num_tokens: int | None = 0
         self._outputs = engine.encode(
             self._input_stream(),
             pooling_params,
@@ -70,15 +78,50 @@ class AsyncPoolingSession:
             yield item
             await self._output_ack.get()
 
+    @property
+    def num_tokens(self) -> int | None:
+        """Tokens appended so far, or None if a text prompt hid the count."""
+        return self._num_tokens
+
     async def append(
         self,
         prompt: PromptType | EngineInput,
+        pooling_params: PoolingParams | None = None,
     ) -> PoolingRequestOutput:
+        """Append one input and return its output.
+
+        `pooling_params` overrides the session's parameters for this input
+        only (e.g. GATHER `readout_offsets`, absolute positions in the whole
+        session that must fall inside this input). Invalid offsets are refused
+        here, before the engine sees the input, and leave the session usable.
+        """
         async with self._append_lock:
             if self._closed:
                 raise PoolingSessionError("pooling session is closed")
+            input_len = _prompt_token_count(prompt)
+            if pooling_params is not None:
+                if not pooling_params.retain_pooling_state:
+                    raise ValueError(
+                        "per-input pooling params require retain_pooling_state=True"
+                    )
+                offsets = pooling_params.readout_offsets
+                if offsets is not None:
+                    if self._num_tokens is None or input_len is None:
+                        raise ValueError(
+                            "readout_offsets require token-id prompts for every "
+                            "input of the session"
+                        )
+                    start, stop = self._num_tokens, self._num_tokens + input_len
+                    if not offsets or offsets[0] < start or offsets[-1] >= stop:
+                        raise ValueError(
+                            f"readout offsets must lie in this input's token "
+                            f"positions [{start}, {stop})"
+                        )
+                pooling_params = pooling_params.clone()
             self._started = True
-            await self._input_queue.put(StreamingInput(prompt=prompt))
+            await self._input_queue.put(
+                StreamingInput(prompt=prompt, sampling_params=pooling_params)
+            )
             try:
                 output = await anext(self._outputs)
             except StopAsyncIteration as error:
@@ -97,6 +140,10 @@ class AsyncPoolingSession:
                     "pooling session append unexpectedly finished the request"
                 )
             await self._output_ack.put(None)
+            if self._num_tokens is not None and input_len is not None:
+                self._num_tokens += input_len
+            else:
+                self._num_tokens = None
             return output
 
     async def close(self) -> None:
@@ -123,3 +170,15 @@ class AsyncPoolingSession:
 
     async def __aexit__(self, *args: object) -> None:
         await self.close()
+
+
+def _prompt_token_count(prompt: PromptType | EngineInput) -> int | None:
+    if isinstance(prompt, list) and all(type(t) is int for t in prompt):
+        return len(prompt)
+    if isinstance(prompt, dict) and "multi_modal_data" not in prompt:
+        # Multimodal preprocessing can change the token count, so the caller's
+        # ids do not give the engine's positions.
+        token_ids = prompt.get("prompt_token_ids")
+        if isinstance(token_ids, list) and "prompt_embeds" not in prompt:
+            return len(token_ids)
+    return None

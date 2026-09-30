@@ -328,6 +328,19 @@ class InputProcessor:
                 sampling_params.update_from_tokenizer(self.tokenizer)
         else:
             pooling_params = params.clone()
+            offsets = pooling_params.readout_offsets
+            if offsets and not resumable:
+                # A retained session's offsets index the whole session, which
+                # only the session client can bound; a one-shot request's
+                # offsets must lie inside its own prompt.
+                seq_len = length_from_prompt_token_ids_or_embeds(
+                    prompt_token_ids, prompt_embeds
+                )
+                if offsets[-1] >= seq_len:
+                    raise ValueError(
+                        f"readout offset {offsets[-1]} is outside the "
+                        f"{seq_len}-token prompt"
+                    )
 
         # Multimodal related.
         mm_features: list[MultiModalFeatureSpec] | None = None

@@ -72,6 +72,11 @@ class PoolingParams(
     # input chunks. This is an engine-internal session primitive; ordinary
     # pooling requests remain one-shot and clear their state after output.
     retain_pooling_state: bool = False
+    # GATHER token pooling: absolute token positions whose final hidden states
+    # are returned, strictly increasing. For a retained streaming session the
+    # positions index the concatenation of every input so far and must lie in
+    # the input being processed. None selects the input's last token.
+    readout_offsets: list[int] | None = None
 
     @property
     def all_parameters(self) -> list[str]:
@@ -114,13 +119,31 @@ class PoolingParams(
         if pooler_config is None:
             return
 
-        if self.retain_pooling_state and pooler_config.seq_pooling_type != "MEAN":
-            raise ValueError(
-                "retain_pooling_state is supported only for sequence MEAN pooling"
-            )
-
         if self.task is None:
             raise ValueError("task must be set before merging parameters")
+
+        token_task = self.task in ("token_embed", "token_classify")
+        gather = token_task and pooler_config.tok_pooling_type == "GATHER"
+        if self.retain_pooling_state and not (
+            gather or (not token_task and pooler_config.seq_pooling_type == "MEAN")
+        ):
+            raise ValueError(
+                "retain_pooling_state is supported only for sequence MEAN "
+                "pooling and token GATHER pooling"
+            )
+        if self.readout_offsets is not None:
+            if not gather:
+                raise ValueError("readout_offsets requires token GATHER pooling")
+            offsets = self.readout_offsets
+            if (
+                not offsets
+                or any(type(o) is not int or o < 0 for o in offsets)
+                or any(a >= b for a, b in zip(offsets, offsets[1:]))
+            ):
+                raise ValueError(
+                    "readout_offsets must be a non-empty, strictly increasing "
+                    "list of non-negative token positions"
+                )
         valid_parameters = self.valid_parameters[self.task]
 
         for k in valid_parameters:
@@ -238,7 +261,8 @@ class PoolingParams(
             f"requires_token_ids={self.requires_token_ids}, "
             f"skip_reading_prefix_cache={self.skip_reading_prefix_cache}, "
             f"late_interaction_params={self.late_interaction_params}, "
-            f"extra_kwargs={self.extra_kwargs})"
+            f"extra_kwargs={self.extra_kwargs}, "
+            f"readout_offsets={self.readout_offsets})"
         )
 
     def __post_init__(self) -> None:

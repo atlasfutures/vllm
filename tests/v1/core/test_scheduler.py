@@ -588,6 +588,53 @@ def test_resumable_pooling_session_reuses_live_kv_for_next_chunk() -> None:
     assert second.scheduled_new_reqs[0].num_computed_tokens == 3
 
 
+def test_resumable_pooling_session_carries_per_input_pooling_params() -> None:
+    scheduler = create_scheduler(
+        max_num_seqs=1,
+        max_num_batched_tokens=16,
+        max_model_len=32,
+        enable_chunked_prefill=True,
+    )
+    request = Request(
+        request_id="gather-session",
+        prompt_token_ids=[1, 2, 3],
+        sampling_params=None,
+        pooling_params=PoolingParams(
+            task="token_embed", retain_pooling_state=True, readout_offsets=[2]
+        ),
+        resumable=True,
+    )
+    scheduler.add_request(request)
+    first = scheduler.schedule()
+    assert first.scheduled_new_reqs[0].pooling_params.readout_offsets == [2]
+    scheduler.update_from_output(
+        first,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[torch.ones(1, 4)],
+        ),
+    )
+
+    scheduler.add_request(
+        Request(
+            request_id=request.request_id,
+            prompt_token_ids=[4, 5, 6],
+            sampling_params=None,
+            pooling_params=PoolingParams(
+                task="token_embed", retain_pooling_state=True, readout_offsets=[3, 5]
+            ),
+            resumable=True,
+        )
+    )
+
+    second = scheduler.schedule()
+    assert second.scheduled_new_reqs[0].pooling_params.readout_offsets == [3, 5]
+
+
 def test_throttle_capacity_bound_guard_admits():
     """Saturation guard: if a cadence-aligned release step cannot drain the
     waiting prefill queue (it ran out of token budget), the throttle backs off on

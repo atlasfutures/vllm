@@ -253,3 +253,44 @@ def test_retained_pooling_state_requires_sequence_mean():
                 )
             )
         )
+
+
+def _gather_config() -> MockModelConfig:
+    return MockModelConfig(
+        pooler_config=PoolerConfig(seq_pooling_type="MEAN", tok_pooling_type="GATHER")
+    )
+
+
+def test_gather_readout_offsets_and_retained_state():
+    params = PoolingParams(
+        task="token_embed",
+        use_activation=False,
+        retain_pooling_state=True,
+        readout_offsets=[0, 7, 9],
+    )
+    params.verify(_gather_config())
+    assert params.skip_reading_prefix_cache is True
+
+    # Sequence MEAN and token GATHER serve side by side on one engine.
+    PoolingParams(task="embed", retain_pooling_state=True).verify(_gather_config())
+
+
+@pytest.mark.parametrize("offsets", [[], [3, 3], [4, 2], [-1, 2]])
+def test_gather_refuses_invalid_readout_offsets(offsets):
+    with pytest.raises(ValueError, match="strictly increasing"):
+        PoolingParams(task="token_embed", readout_offsets=offsets).verify(
+            _gather_config()
+        )
+
+
+def test_readout_offsets_require_gather():
+    with pytest.raises(ValueError, match="requires token GATHER"):
+        PoolingParams(task="token_embed", readout_offsets=[1]).verify(
+            MockModelConfig(pooler_config=PoolerConfig(tok_pooling_type="ALL"))
+        )
+    with pytest.raises(ValueError, match="requires token GATHER"):
+        PoolingParams(task="embed", readout_offsets=[1]).verify(_gather_config())
+    with pytest.raises(ValueError, match="retain_pooling_state"):
+        PoolingParams(task="token_embed", retain_pooling_state=True).verify(
+            MockModelConfig(pooler_config=PoolerConfig(tok_pooling_type="ALL"))
+        )
