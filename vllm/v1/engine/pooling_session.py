@@ -224,12 +224,18 @@ def _prompt_token_count(
         return len(token_ids)
     # Multimodal preprocessing expands each image placeholder, so the
     # caller's ids give the engine's positions only with the declared
-    # expansion (which the engine verifies).
+    # expansion (which the engine verifies). This assumes one raw placeholder
+    # token per image (Qwen-VL style); a processor whose raw target is wider
+    # or empty ends the session at the post-append count check instead.
     counts = pooling_params.image_token_counts if pooling_params else None
     if counts is None or not isinstance(mm_data, dict) or set(mm_data) != {"image"}:
         return None
     images = mm_data["image"]
-    num_images = len(images) if isinstance(images, list) else 1
+    if not isinstance(images, list):
+        # A single item or a batched tensor: its image count depends on the
+        # processor's item semantics, so leave the length to the engine.
+        return None
+    num_images = len(images)
     if num_images != len(counts):
         raise ValueError(
             f"image_token_counts declares {len(counts)} images, but the "

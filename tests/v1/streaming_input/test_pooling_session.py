@@ -293,6 +293,13 @@ async def test_pooling_session_refuses_counts_for_another_number_of_images():
             TokensPrompt(prompt_token_ids=[_PAD], multi_modal_data={"image": [3]}),
             _gather_images([0], [3, 3]),
         )
+    # A non-list image value has processor-defined item semantics, so its
+    # length is unknown and its offsets are refused, not its count.
+    with pytest.raises(ValueError, match="engine token count"):
+        await session.append(
+            TokensPrompt(prompt_token_ids=[_PAD], multi_modal_data={"image": 3}),
+            _gather_images([0], [3, 3]),
+        )
     # Refused before the engine; the session stays usable.
     await session.append(TokensPrompt(prompt_token_ids=[1]), _gather([0]))
     await session.close()
