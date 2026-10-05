@@ -51,6 +51,7 @@ from .interfaces import (
     is_hybrid,
     requires_raw_input_tokens,
     supports_mamba_prefix_caching,
+    supports_mm_encoder_dtype,
     supports_multimodal,
     supports_multimodal_encoder_tp_data,
     supports_multimodal_raw_input_only,
@@ -788,6 +789,7 @@ class _ModelInfo:
     supports_multimodal_raw_input_only: bool
     requires_raw_input_tokens: bool
     supports_multimodal_encoder_tp_data: bool
+    supports_mm_encoder_dtype: bool
     supports_pp: bool
     has_inner_state: bool
     is_attention_free: bool
@@ -817,6 +819,7 @@ class _ModelInfo:
             supports_multimodal_encoder_tp_data=supports_multimodal_encoder_tp_data(
                 model
             ),
+            supports_mm_encoder_dtype=supports_mm_encoder_dtype(model),
             supports_pp=supports_pp(model),
             has_inner_state=has_inner_state(model),
             is_attention_free=is_attention_free(model),

@@ -179,6 +179,17 @@ class MultiModalConfig:
     """Safety margin multiplied onto scales when auto-saving. A value > 1
     leaves headroom so that inputs with larger activations than the
     calibration set do not overflow FP8 range. Default 1.5."""
+    mm_encoder_dtype: Literal["float32"] | None = None
+    """Optional parameter and compute dtype for the multi-modal encoder. When
+    set, its output embeddings are cast to the model dtype before they enter
+    the language model, and the encoder attention backend must be
+    `TORCH_SDPA` (selected when `mm_encoder_attn_backend` is unset). `None`
+    keeps the model dtype. Only models that declare
+    `supports_mm_encoder_dtype` accept it."""
+    mm_encoder_per_item: bool = False
+    """Run the multi-modal encoder once per item instead of on all items of a
+    batch in one call. Cannot be combined with `mm_encoder_tp_mode="data"`.
+    Only models that declare `supports_mm_encoder_dtype` accept it."""
     interleave_mm_strings: bool = False
     """Enable fully interleaved support for multimodal prompts, while using
     --chat-template-content-format=string."""
@@ -288,6 +299,24 @@ class MultiModalConfig:
                 "'mm_encoder_fp8_scale_path' (saving requires dynamic scaling)."
             )
 
+        if self.mm_encoder_dtype is not None:
+            if self.mm_encoder_attn_dtype is not None:
+                raise ValueError(
+                    "'mm_encoder_dtype' cannot be used with 'mm_encoder_attn_dtype'."
+                )
+            if self.mm_encoder_attn_backend is None:
+                self.mm_encoder_attn_backend = AttentionBackendEnum.TORCH_SDPA
+            elif self.mm_encoder_attn_backend != AttentionBackendEnum.TORCH_SDPA:
+                raise ValueError(
+                    "'mm_encoder_dtype' requires 'mm_encoder_attn_backend' to be "
+                    f"TORCH_SDPA, got {self.mm_encoder_attn_backend.name}."
+                )
+        if self.mm_encoder_per_item and self.mm_encoder_tp_mode == "data":
+            raise ValueError(
+                "'mm_encoder_per_item' cannot be used with "
+                "'mm_encoder_tp_mode' set to 'data'."
+            )
+
         # Validate file paths exist.
         if self.mm_encoder_fp8_scale_path is not None:
             scale_path = Path(self.mm_encoder_fp8_scale_path)
@@ -320,6 +349,8 @@ class MultiModalConfig:
             self.mm_encoder_tp_mode,
             self.mm_encoder_attn_dtype,
             self.mm_encoder_fp8_scale_path,
+            self.mm_encoder_dtype,
+            self.mm_encoder_per_item,
         ]
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str

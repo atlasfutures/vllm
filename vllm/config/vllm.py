@@ -432,6 +432,15 @@ class VllmConfig:
                 and self.model_config.multimodal_config
             ):
                 vllm_factors.append(self.model_config.multimodal_config.compute_hash())
+            mm_config = self.model_config.multimodal_config
+            if mm_config and (
+                mm_config.mm_encoder_dtype is not None or mm_config.mm_encoder_per_item
+            ):
+                # They change the encoder's memory profile, so they must
+                # reach the startup-plan fingerprint without compile_mm_encoder.
+                vllm_factors.append(
+                    (mm_config.mm_encoder_dtype, mm_config.mm_encoder_per_item)
+                )
         else:
             vllm_factors.append("None")
         if self.cache_config:
@@ -1144,6 +1153,31 @@ class VllmConfig:
                 "async speculative decoding).",
             )
             self.model_config.disable_cascade_attn = True
+
+        if (
+            self.model_config is not None
+            and self.model_config.multimodal_config is not None
+            and (
+                self.model_config.multimodal_config.mm_encoder_dtype is not None
+                or self.model_config.multimodal_config.mm_encoder_per_item
+            )
+            and self.compilation_config.cudagraph_mm_encoder
+        ):
+            raise ValueError(
+                "'mm_encoder_dtype' and 'mm_encoder_per_item' cannot be used with "
+                "'cudagraph_mm_encoder': encoder CUDA graphs bypass them."
+            )
+
+        if (
+            self.model_config is not None
+            and self.model_config.multimodal_config is not None
+            and self.model_config.multimodal_config.mm_encoder_dtype is not None
+            and self.load_config.load_format == "tensorizer"
+        ):
+            raise ValueError(
+                "'mm_encoder_dtype' cannot be used with load_format 'tensorizer': "
+                "it deserializes the encoder in the model dtype."
+            )
 
         if (
             self.model_config is not None

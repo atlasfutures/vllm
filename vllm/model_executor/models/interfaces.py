@@ -489,6 +489,14 @@ def supports_multimodal_encoder_tp_data(model: type[object] | object) -> bool:
     return getattr(model, "supports_encoder_tp_data", False)
 
 
+def supports_mm_encoder_dtype(model: type[object] | object) -> bool:
+    """Whether the model's own class honours `mm_encoder_dtype` and
+    `mm_encoder_per_item`. Not inherited: a subclass may override the methods
+    that implement them, so each class declares it itself."""
+    cls = model if isinstance(model, type) else type(model)
+    return bool(cls.__dict__.get("supports_mm_encoder_dtype", False))
+
+
 @overload
 def supports_multimodal_pruning(
     model: type[object],

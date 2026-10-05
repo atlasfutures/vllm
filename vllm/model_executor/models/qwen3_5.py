@@ -25,6 +25,7 @@
 """Inference-only Qwen3.5 Series compatible with HuggingFace weights."""
 
 from collections.abc import Iterable
+from typing import ClassVar
 
 import torch
 from torch import nn
@@ -85,6 +86,7 @@ from .qwen3_vl import (
     Qwen3VLForConditionalGeneration,
     Qwen3VLMultiModalProcessor,
     Qwen3VLProcessingInfo,
+    _apply_mm_encoder_dtype,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -399,6 +401,7 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLMBase, QwenNextMixtureOfExperts):
 )
 class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid):
     supports_multimodal_pruning = True
+    supports_mm_encoder_dtype: ClassVar[bool] = True
 
     packed_modules_mapping = Qwen3VLForConditionalGeneration.packed_modules_mapping | {
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
@@ -439,6 +442,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
+            _apply_mm_encoder_dtype(self, quant_config)
 
         with self._mark_language_model(vllm_config):
             self.language_model = Qwen3_5ForCausalLM(

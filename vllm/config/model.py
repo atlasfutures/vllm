@@ -373,6 +373,8 @@ class ModelConfig:
     mm_encoder_fp8_scale_path: InitVar[str | None] = None
     mm_encoder_fp8_scale_save_path: InitVar[str | None] = None
     mm_encoder_fp8_scale_save_margin: InitVar[float | None] = None
+    mm_encoder_dtype: InitVar[str | None] = None
+    mm_encoder_per_item: InitVar[bool | None] = None
     interleave_mm_strings: InitVar[bool | None] = None
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
@@ -502,6 +504,8 @@ class ModelConfig:
         mm_encoder_fp8_scale_path: str | None,
         mm_encoder_fp8_scale_save_path: str | None,
         mm_encoder_fp8_scale_save_margin: float | None,
+        mm_encoder_dtype: str | None,
+        mm_encoder_per_item: bool | None,
         interleave_mm_strings: bool | None,
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
@@ -703,6 +707,14 @@ class ModelConfig:
             mm_processor_cache_gb = 0
             logger.info("Encoder-decoder model detected, disabling mm processor cache.")
 
+        if (
+            mm_encoder_dtype is not None or mm_encoder_per_item
+        ) and not self._model_info.supports_mm_encoder_dtype:
+            raise ValueError(
+                "'mm_encoder_dtype' and 'mm_encoder_per_item' are not supported "
+                f"by {self._model_info.architecture}."
+            )
+
         # Init multimodal config if needed
         if self._model_info.supports_multimodal:
             self.hf_image_processor_config = get_hf_image_processor_config(
@@ -734,6 +746,8 @@ class ModelConfig:
                 mm_encoder_fp8_scale_path=mm_encoder_fp8_scale_path,
                 mm_encoder_fp8_scale_save_path=mm_encoder_fp8_scale_save_path,
                 mm_encoder_fp8_scale_save_margin=mm_encoder_fp8_scale_save_margin,
+                mm_encoder_dtype=mm_encoder_dtype,
+                mm_encoder_per_item=mm_encoder_per_item,
                 interleave_mm_strings=interleave_mm_strings,
                 skip_mm_profiling=skip_mm_profiling,
                 video_pruning_rate=video_pruning_rate,

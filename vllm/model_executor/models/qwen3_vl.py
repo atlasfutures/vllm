@@ -27,7 +27,7 @@
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from functools import lru_cache, partial
 from itertools import islice
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 import torch
@@ -1694,6 +1694,62 @@ class Qwen3LLMForCausalLM(Qwen3ForCausalLM):
         )
 
 
+def _apply_mm_encoder_dtype(
+    model: "Qwen3VLForConditionalGeneration",
+    quant_config: QuantizationConfig | None,
+) -> None:
+    """Cast the just-built vision tower to `mm_encoder_dtype`.
+
+    Runs in `__init__`, before any loader writes weights, so every loader
+    that copies into the parameters fills the cast ones, inside the weights
+    memory pool and before memory profiling."""
+    if model.multimodal_config.mm_encoder_dtype is None:
+        return
+    if quant_config is not None:
+        raise ValueError(
+            "'mm_encoder_dtype' cannot be used with a quantized model "
+            f"({quant_config.get_name()})."
+        )
+    model.visual.float()
+
+
+def _check_visual_dtype(model: "Qwen3VLForConditionalGeneration") -> None:
+    encoder_dtype = model.multimodal_config.mm_encoder_dtype
+    if encoder_dtype is not None and model.visual.dtype != getattr(
+        torch, encoder_dtype
+    ):
+        raise RuntimeError(
+            f"mm_encoder_dtype={encoder_dtype!r} but the vision tower is "
+            f"{model.visual.dtype}: its weights were loaded by a path that "
+            "replaced the cast parameters."
+        )
+
+
+def _run_visual(
+    model: "Qwen3VLForConditionalGeneration",
+    pixel_values: torch.Tensor,
+    grid_thw: torch.Tensor,
+) -> torch.Tensor:
+    if not model.multimodal_config.mm_encoder_per_item:
+        return model.visual(pixel_values, grid_thw=grid_thw)
+    patch_counts = grid_thw.prod(-1).tolist()
+    return torch.cat(
+        [
+            model.visual(item_pixels, grid_thw=grid_thw[i : i + 1])
+            for i, item_pixels in enumerate(pixel_values.split(patch_counts))
+        ]
+    )
+
+
+def _to_lm_dtype(
+    model: "Qwen3VLForConditionalGeneration",
+    embeds: Sequence[torch.Tensor],
+) -> tuple[torch.Tensor, ...]:
+    if model.multimodal_config.mm_encoder_dtype is None:
+        return tuple(embeds)
+    return tuple(e.to(model.model_config.dtype) for e in embeds)
+
+
 @MULTIMODAL_REGISTRY.register_processor(
     Qwen3VLMultiModalProcessor,
     info=Qwen3VLProcessingInfo,
@@ -1724,6 +1780,7 @@ class Qwen3VLForConditionalGeneration(
     }
 
     supports_encoder_tp_data = True
+    supports_mm_encoder_dtype: ClassVar[bool] = True
 
     supported_video_pruning_methods = ("evs", "vidcom2")
 
@@ -1785,6 +1842,7 @@ class Qwen3VLForConditionalGeneration(
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
+            _apply_mm_encoder_dtype(self, quant_config)
 
             # register buffer for deepstack
             if self.use_deepstack:
@@ -2212,18 +2270,25 @@ class Qwen3VLForConditionalGeneration(
         if image_input["type"] == "image_embeds":
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
+            _check_visual_dtype(self)
             pixel_values = image_input["pixel_values"].type(self.visual.dtype)
             if self.use_data_parallel:
-                return run_dp_sharded_mrope_vision_model(
-                    self.visual, pixel_values, grid_thw.tolist(), rope_type="rope_3d"
+                return _to_lm_dtype(
+                    self,
+                    run_dp_sharded_mrope_vision_model(
+                        self.visual,
+                        pixel_values,
+                        grid_thw.tolist(),
+                        rope_type="rope_3d",
+                    ),
                 )
             else:
-                image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
+                image_embeds = _run_visual(self, pixel_values, grid_thw)
 
         # Split concatenated embeddings for each image item.
         merge_size = self.visual.spatial_merge_size
         sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
-        return image_embeds.split(sizes)
+        return _to_lm_dtype(self, image_embeds.split(sizes))
 
     def _process_video_input(
         self, video_input: Qwen2_5_VLVideoInputs
@@ -2234,21 +2299,28 @@ class Qwen3VLForConditionalGeneration(
         if video_input["type"] == "video_embeds":
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
+            _check_visual_dtype(self)
             pixel_values_videos = video_input["pixel_values_videos"].type(
                 self.visual.dtype
             )
             if self.use_data_parallel:
                 grid_thw_list = grid_thw.tolist()
-                return run_dp_sharded_mrope_vision_model(
-                    self.visual, pixel_values_videos, grid_thw_list, rope_type="rope_3d"
+                return _to_lm_dtype(
+                    self,
+                    run_dp_sharded_mrope_vision_model(
+                        self.visual,
+                        pixel_values_videos,
+                        grid_thw_list,
+                        rope_type="rope_3d",
+                    ),
                 )
             else:
-                video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw)
+                video_embeds = _run_visual(self, pixel_values_videos, grid_thw)
 
         # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size
         sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
-        return video_embeds.split(sizes)
+        return _to_lm_dtype(self, video_embeds.split(sizes))
 
     def _postprocess_image_embeds_evs(
         self,
