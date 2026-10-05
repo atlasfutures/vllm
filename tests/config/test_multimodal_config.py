@@ -76,6 +76,34 @@ def test_mm_encoder_attn_dtype_hash_updates(tmp_path):
     assert fp8_hash != fp8_static_hash
 
 
+def test_mm_encoder_dtype_selects_torch_sdpa():
+    config = MultiModalConfig(mm_encoder_dtype="float32")
+    assert config.mm_encoder_attn_backend == AttentionBackendEnum.TORCH_SDPA
+    with pytest.raises(ValueError, match="TORCH_SDPA"):
+        MultiModalConfig(
+            mm_encoder_dtype="float32", mm_encoder_attn_backend="FLASH_ATTN"
+        )
+    with pytest.raises(ValueError):
+        MultiModalConfig(mm_encoder_dtype="bfloat16")
+
+
+def test_mm_encoder_per_item_refuses_data_parallel_encoder():
+    with pytest.raises(ValueError, match="mm_encoder_per_item"):
+        MultiModalConfig(mm_encoder_per_item=True, mm_encoder_tp_mode="data")
+
+
+def test_mm_encoder_dtype_and_per_item_hash_updates():
+    sdpa = AttentionBackendEnum.TORCH_SDPA
+    base_hash = MultiModalConfig(mm_encoder_attn_backend=sdpa).compute_hash()
+    fp32_hash = MultiModalConfig(
+        mm_encoder_attn_backend=sdpa, mm_encoder_dtype="float32"
+    ).compute_hash()
+    per_item_hash = MultiModalConfig(
+        mm_encoder_attn_backend=sdpa, mm_encoder_per_item=True
+    ).compute_hash()
+    assert len({base_hash, fp32_hash, per_item_hash}) == 3
+
+
 def _make_mm_prefix_model_config(
     *,
     language_model_only: bool = False,

@@ -599,6 +599,30 @@ def test_human_readable_other_args():
     assert args.max_num_batched_tokens == 2**10 * 4
 
 
+def test_mm_encoder_dtype_and_per_item_reach_multimodal_config():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser(exit_on_error=False))
+    args = parser.parse_args(["--mm-encoder-dtype", "float32", "--mm-encoder-per-item"])
+    assert args.mm_encoder_dtype == "float32"
+    assert args.mm_encoder_per_item is True
+    with pytest.raises(ArgumentError):
+        parser.parse_args(["--mm-encoder-dtype", "bfloat16"])
+
+    engine_args = EngineArgs(
+        model="Qwen/Qwen3.5-0.8B", mm_encoder_dtype="float32", mm_encoder_per_item=True
+    )
+    mm_config = engine_args.create_model_config().multimodal_config
+    assert mm_config.mm_encoder_dtype == "float32"
+    assert mm_config.mm_encoder_per_item is True
+
+
+@pytest.mark.parametrize(
+    "option", [{"mm_encoder_dtype": "float32"}, {"mm_encoder_per_item": True}]
+)
+def test_mm_encoder_dtype_refused_by_undeclared_model(option):
+    with pytest.raises(ValueError, match="not supported by OPTForCausalLM"):
+        EngineArgs(model="facebook/opt-125m", **option).create_model_config()
+
+
 def test_numa_bind_args():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = parser.parse_args(

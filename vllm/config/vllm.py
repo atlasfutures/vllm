@@ -1148,6 +1148,20 @@ class VllmConfig:
         if (
             self.model_config is not None
             and self.model_config.multimodal_config is not None
+            and (
+                self.model_config.multimodal_config.mm_encoder_dtype is not None
+                or self.model_config.multimodal_config.mm_encoder_per_item
+            )
+            and self.compilation_config.cudagraph_mm_encoder
+        ):
+            raise ValueError(
+                "'mm_encoder_dtype' and 'mm_encoder_per_item' cannot be used with "
+                "'cudagraph_mm_encoder': encoder CUDA graphs bypass them."
+            )
+
+        if (
+            self.model_config is not None
+            and self.model_config.multimodal_config is not None
             and self.model_config.multimodal_config.mm_tensor_ipc == "torch_shm"
             and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"
         ):

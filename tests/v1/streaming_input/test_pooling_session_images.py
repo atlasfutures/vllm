@@ -66,11 +66,26 @@ def _gather(
     )
 
 
-# One engine for the module: each test reuses its loop.
-@pytest_asyncio.fixture(scope="module", loop_scope="module")
-async def engine():
+# Vision tower in the model dtype (bf16), or in float32 run once per image
+# with its embeddings cast to bf16 at language-model entry.
+ENCODER_OPTIONS = {
+    "bf16_encoder": {},
+    "fp32_per_item_encoder": {
+        "mm_encoder_dtype": "float32",
+        "mm_encoder_per_item": True,
+        "mm_encoder_attn_backend": "TORCH_SDPA",
+    },
+}
+
+
+# One engine per encoder option: each test reuses its loop.
+@pytest_asyncio.fixture(
+    scope="module", loop_scope="module", params=sorted(ENCODER_OPTIONS)
+)
+async def engine(request):
     llm = AsyncLLM.from_engine_args(
         AsyncEngineArgs(
+            **ENCODER_OPTIONS[request.param],
             model=MODEL,
             runner="pooling",
             dtype="bfloat16",

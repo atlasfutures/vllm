@@ -25,6 +25,7 @@
 """Inference-only Qwen3.5 Series compatible with HuggingFace weights."""
 
 from collections.abc import Iterable
+from typing import ClassVar
 
 import torch
 from torch import nn
@@ -85,6 +86,7 @@ from .qwen3_vl import (
     Qwen3VLForConditionalGeneration,
     Qwen3VLMultiModalProcessor,
     Qwen3VLProcessingInfo,
+    _apply_mm_encoder_dtype,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -399,6 +401,7 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLMBase, QwenNextMixtureOfExperts):
 )
 class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid):
     supports_multimodal_pruning = True
+    supports_mm_encoder_dtype: ClassVar[bool] = True
 
     packed_modules_mapping = Qwen3VLForConditionalGeneration.packed_modules_mapping | {
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
@@ -524,7 +527,9 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
             self,
             skip_prefixes=["mtp."],
         )
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        _apply_mm_encoder_dtype(self)
+        return loaded
 
     @classmethod
     def get_mamba_state_dtype_from_config(
