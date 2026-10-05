@@ -77,6 +77,12 @@ class PoolingParams(
     # positions index the concatenation of every input so far and must lie in
     # the input being processed. None selects the input's last token.
     readout_offsets: list[int] | None = None
+    # Declared expansion of this input's images: for each image in the
+    # prompt's multi_modal_data, in prompt order, the number of prompt
+    # positions vLLM's processor must expand its placeholder to. The request is
+    # refused when the processed placeholders differ. A retained session also
+    # uses it to place this input's readout offsets before the engine runs.
+    image_token_counts: list[int] | None = None
 
     @property
     def all_parameters(self) -> list[str]:
@@ -262,7 +268,8 @@ class PoolingParams(
             f"skip_reading_prefix_cache={self.skip_reading_prefix_cache}, "
             f"late_interaction_params={self.late_interaction_params}, "
             f"extra_kwargs={self.extra_kwargs}, "
-            f"readout_offsets={self.readout_offsets})"
+            f"readout_offsets={self.readout_offsets}, "
+            f"image_token_counts={self.image_token_counts})"
         )
 
     def __post_init__(self) -> None:
@@ -271,4 +278,10 @@ class PoolingParams(
             raise ValueError(
                 "For pooling output_kind has to be FINAL_ONLY, "
                 f"got {self.output_kind!r}"
+            )
+        counts = self.image_token_counts
+        if counts is not None and any(type(n) is not int or n < 1 for n in counts):
+            raise ValueError(
+                "image_token_counts must be a list of positive token counts, "
+                f"got {counts!r}"
             )
