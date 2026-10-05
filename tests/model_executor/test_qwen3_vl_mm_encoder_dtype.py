@@ -126,9 +126,12 @@ def test_init_hook_refuses_quantized_model():
         _apply_mm_encoder_dtype(model, quant_config=quant_config)
 
 
-def test_vision_tower_left_in_model_dtype_is_refused():
-    """A loader that replaced the cast parameters fails loudly, not silently."""
+@pytest.mark.parametrize("use_data_parallel", [False, True])
+def test_vision_tower_left_in_model_dtype_is_refused(use_data_parallel):
+    """A loader that replaced the cast parameters fails loudly, not silently,
+    on the data-parallel encoder path too."""
     model = _fake_model(mm_encoder_dtype="float32")
+    model.use_data_parallel = use_data_parallel
     model.visual.dtype = torch.bfloat16
 
     with pytest.raises(RuntimeError, match="vision tower is torch.bfloat16"):

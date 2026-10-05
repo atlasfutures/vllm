@@ -1713,11 +1713,7 @@ def _apply_mm_encoder_dtype(
     model.visual.float()
 
 
-def _run_visual(
-    model: "Qwen3VLForConditionalGeneration",
-    pixel_values: torch.Tensor,
-    grid_thw: torch.Tensor,
-) -> torch.Tensor:
+def _check_visual_dtype(model: "Qwen3VLForConditionalGeneration") -> None:
     encoder_dtype = model.multimodal_config.mm_encoder_dtype
     if encoder_dtype is not None and model.visual.dtype != getattr(
         torch, encoder_dtype
@@ -1727,6 +1723,13 @@ def _run_visual(
             f"{model.visual.dtype}: its weights were loaded by a path that "
             "replaced the cast parameters."
         )
+
+
+def _run_visual(
+    model: "Qwen3VLForConditionalGeneration",
+    pixel_values: torch.Tensor,
+    grid_thw: torch.Tensor,
+) -> torch.Tensor:
     if not model.multimodal_config.mm_encoder_per_item:
         return model.visual(pixel_values, grid_thw=grid_thw)
     patch_counts = grid_thw.prod(-1).tolist()
@@ -2267,6 +2270,7 @@ class Qwen3VLForConditionalGeneration(
         if image_input["type"] == "image_embeds":
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
+            _check_visual_dtype(self)
             pixel_values = image_input["pixel_values"].type(self.visual.dtype)
             if self.use_data_parallel:
                 return _to_lm_dtype(
@@ -2295,6 +2299,7 @@ class Qwen3VLForConditionalGeneration(
         if video_input["type"] == "video_embeds":
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
+            _check_visual_dtype(self)
             pixel_values_videos = video_input["pixel_values_videos"].type(
                 self.visual.dtype
             )

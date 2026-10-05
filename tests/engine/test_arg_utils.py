@@ -9,7 +9,14 @@ from typing import Annotated, Literal
 import pytest
 from pydantic import Field
 
-from vllm.config import AttentionConfig, CompilationConfig, ModelConfig, config
+from vllm.config import (
+    AttentionConfig,
+    CompilationConfig,
+    LoadConfig,
+    ModelConfig,
+    VllmConfig,
+    config,
+)
 from vllm.engine.arg_utils import (
     EngineArgs,
     _expand_json_human_readable_numbers,
@@ -621,6 +628,34 @@ def test_mm_encoder_dtype_and_per_item_reach_multimodal_config():
 def test_mm_encoder_dtype_refused_by_undeclared_model(option):
     with pytest.raises(ValueError, match="not supported by OPTForCausalLM"):
         EngineArgs(model="facebook/opt-125m", **option).create_model_config()
+
+
+@pytest.mark.parametrize(
+    "option", [{"mm_encoder_dtype": "float32"}, {"mm_encoder_per_item": True}]
+)
+def test_mm_encoder_options_change_vllm_config_hash(option):
+    """Startup plans keyed by this hash must not be reused across them."""
+    model_config = EngineArgs(model="Qwen/Qwen3.5-0.8B").create_model_config()
+    option_config = EngineArgs(
+        model="Qwen/Qwen3.5-0.8B", **option
+    ).create_model_config()
+
+    assert (
+        VllmConfig(model_config=model_config).compute_hash()
+        != VllmConfig(model_config=option_config).compute_hash()
+    )
+
+
+def test_mm_encoder_dtype_refused_with_tensorizer():
+    model_config = EngineArgs(
+        model="Qwen/Qwen3.5-0.8B", mm_encoder_dtype="float32"
+    ).create_model_config()
+
+    with pytest.raises(ValueError, match="tensorizer"):
+        VllmConfig(
+            model_config=model_config,
+            load_config=LoadConfig(load_format="tensorizer"),
+        )
 
 
 def test_numa_bind_args():
