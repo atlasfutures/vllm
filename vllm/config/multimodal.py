@@ -300,6 +300,10 @@ class MultiModalConfig:
             )
 
         if self.mm_encoder_dtype is not None:
+            if self.mm_encoder_attn_dtype is not None:
+                raise ValueError(
+                    "'mm_encoder_dtype' cannot be used with 'mm_encoder_attn_dtype'."
+                )
             if self.mm_encoder_attn_backend is None:
                 self.mm_encoder_attn_backend = AttentionBackendEnum.TORCH_SDPA
             elif self.mm_encoder_attn_backend != AttentionBackendEnum.TORCH_SDPA:

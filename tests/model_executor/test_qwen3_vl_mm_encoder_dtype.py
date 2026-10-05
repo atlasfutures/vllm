@@ -104,15 +104,35 @@ def test_precomputed_image_embeds_are_cast_to_lm_dtype():
     ("mm_encoder_dtype", "expected"),
     [(None, torch.bfloat16), ("float32", torch.float32)],
 )
-def test_load_weights_hook_casts_vision_tower(mm_encoder_dtype, expected):
+def test_init_hook_casts_vision_tower(mm_encoder_dtype, expected):
     model = SimpleNamespace(
         visual=torch.nn.Linear(2, 2, dtype=torch.bfloat16),
         multimodal_config=MultiModalConfig(mm_encoder_dtype=mm_encoder_dtype),
     )
 
-    _apply_mm_encoder_dtype(model)
+    _apply_mm_encoder_dtype(model, quant_config=None)
 
     assert model.visual.weight.dtype == expected
+
+
+def test_init_hook_refuses_quantized_model():
+    model = SimpleNamespace(
+        visual=torch.nn.Linear(2, 2, dtype=torch.bfloat16),
+        multimodal_config=MultiModalConfig(mm_encoder_dtype="float32"),
+    )
+    quant_config = SimpleNamespace(get_name=lambda: "fp8")
+
+    with pytest.raises(ValueError, match="quantized"):
+        _apply_mm_encoder_dtype(model, quant_config=quant_config)
+
+
+def test_vision_tower_left_in_model_dtype_is_refused():
+    """A loader that replaced the cast parameters fails loudly, not silently."""
+    model = _fake_model(mm_encoder_dtype="float32")
+    model.visual.dtype = torch.bfloat16
+
+    with pytest.raises(RuntimeError, match="vision tower is torch.bfloat16"):
+        Qwen3VLForConditionalGeneration._process_image_input(model, _image_input())
 
 
 def test_support_is_declared_per_class_not_inherited():

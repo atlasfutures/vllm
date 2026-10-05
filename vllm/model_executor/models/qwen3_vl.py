@@ -1694,13 +1694,23 @@ class Qwen3LLMForCausalLM(Qwen3ForCausalLM):
         )
 
 
-def _apply_mm_encoder_dtype(model: "Qwen3VLForConditionalGeneration") -> None:
-    """Cast the vision tower to `mm_encoder_dtype` once its weights are loaded.
+def _apply_mm_encoder_dtype(
+    model: "Qwen3VLForConditionalGeneration",
+    quant_config: QuantizationConfig | None,
+) -> None:
+    """Cast the just-built vision tower to `mm_encoder_dtype`.
 
-    Runs inside `load_weights`, so the cast tensors are allocated in the
-    weights memory pool and before memory profiling."""
-    if model.multimodal_config.mm_encoder_dtype == "float32":
-        model.visual.float()
+    Runs in `__init__`, before any loader writes weights, so every loader
+    that copies into the parameters fills the cast ones, inside the weights
+    memory pool and before memory profiling."""
+    if model.multimodal_config.mm_encoder_dtype is None:
+        return
+    if quant_config is not None:
+        raise ValueError(
+            "'mm_encoder_dtype' cannot be used with a quantized model "
+            f"({quant_config.get_name()})."
+        )
+    model.visual.float()
 
 
 def _run_visual(
@@ -1708,6 +1718,15 @@ def _run_visual(
     pixel_values: torch.Tensor,
     grid_thw: torch.Tensor,
 ) -> torch.Tensor:
+    encoder_dtype = model.multimodal_config.mm_encoder_dtype
+    if encoder_dtype is not None and model.visual.dtype != getattr(
+        torch, encoder_dtype
+    ):
+        raise RuntimeError(
+            f"mm_encoder_dtype={encoder_dtype!r} but the vision tower is "
+            f"{model.visual.dtype}: its weights were loaded by a path that "
+            "replaced the cast parameters."
+        )
     if not model.multimodal_config.mm_encoder_per_item:
         return model.visual(pixel_values, grid_thw=grid_thw)
     patch_counts = grid_thw.prod(-1).tolist()
@@ -1820,6 +1839,7 @@ class Qwen3VLForConditionalGeneration(
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
+            _apply_mm_encoder_dtype(self, quant_config)
 
             # register buffer for deepstack
             if self.use_deepstack:
@@ -3017,9 +3037,7 @@ class Qwen3VLForConditionalGeneration(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        _apply_mm_encoder_dtype(self)
-        return loaded
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """

@@ -442,6 +442,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
+            _apply_mm_encoder_dtype(self, quant_config)
 
         with self._mark_language_model(vllm_config):
             self.language_model = Qwen3_5ForCausalLM(
@@ -527,9 +528,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
             self,
             skip_prefixes=["mtp."],
         )
-        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        _apply_mm_encoder_dtype(self)
-        return loaded
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     @classmethod
     def get_mamba_state_dtype_from_config(

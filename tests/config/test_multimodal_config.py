@@ -85,6 +85,8 @@ def test_mm_encoder_dtype_selects_torch_sdpa():
         )
     with pytest.raises(ValueError):
         MultiModalConfig(mm_encoder_dtype="bfloat16")
+    with pytest.raises(ValueError, match="mm_encoder_attn_dtype"):
+        MultiModalConfig(mm_encoder_dtype="float32", mm_encoder_attn_dtype="fp8")
 
 
 def test_mm_encoder_per_item_refuses_data_parallel_encoder():
