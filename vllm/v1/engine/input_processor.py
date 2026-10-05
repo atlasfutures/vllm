@@ -380,6 +380,9 @@ class InputProcessor:
                     )
                 )
 
+        if pooling_params is not None:
+            _check_image_token_counts(pooling_params, mm_features)
+
         return EngineCoreRequest(
             request_id=request_id,
             prompt_token_ids=prompt_token_ids,
@@ -505,3 +508,30 @@ class InputProcessor:
             self._validate_model_input(encoder_input, prompt_type="encoder")
 
         self._validate_model_input(decoder_input, prompt_type="decoder")
+
+
+def _check_image_token_counts(
+    params: PoolingParams,
+    mm_features: list[MultiModalFeatureSpec] | None,
+) -> None:
+    """Refuse a request whose processed images differ from the caller's
+    declared expansion (`PoolingParams.image_token_counts`).
+
+    The caller places readout offsets in the expanded prompt; a processor that
+    expands an image to another length would shift every later position.
+    """
+    declared = params.image_token_counts
+    if declared is None:
+        return
+    expanded = [
+        feature.mm_position.length
+        for feature in mm_features or ()
+        if feature.modality == "image"
+    ]
+    if expanded != declared:
+        raise ValueError(
+            f"image token counts differ from the declared expansion: declared "
+            f"{declared}, vLLM's processor expanded the input's images to "
+            f"{expanded} tokens (check the image size settings, e.g. "
+            f"mm_processor_kwargs max_pixels, against the caller's)"
+        )

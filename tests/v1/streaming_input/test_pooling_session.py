@@ -13,6 +13,8 @@ from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.v1.engine.pooling_session import AsyncPoolingSession, PoolingSessionError
 
+_PAD = 99
+
 
 class _FakePoolingEngine:
     def __init__(self) -> None:
@@ -28,9 +30,17 @@ class _FakePoolingEngine:
         cumulative: list[int] = []
         async for item in prompt:
             prompt_ids = item.prompt
+            images: list[int] = []
             if isinstance(prompt_ids, dict):
+                images = list(
+                    (prompt_ids.get("multi_modal_data") or {}).get("image", [])
+                )
                 prompt_ids = prompt_ids["prompt_token_ids"]
-            chunk = list(prompt_ids)
+            chunk = []
+            for token in prompt_ids:
+                # Like vLLM's processor: an image placeholder expands to the
+                # image's tokens (a fake image is its token count).
+                chunk += [token] * (images.pop(0) if token == _PAD else 1)
             self.appended.append(chunk)
             self.params.append(item.sampling_params)
             cumulative.extend(chunk)
@@ -188,15 +198,140 @@ async def test_pooling_session_tracks_raw_token_list_prompts() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pooling_session_refuses_offsets_after_a_multimodal_prompt() -> None:
-    """Multimodal preprocessing can change the token count, so offsets are refused."""
+async def test_pooling_session_counts_processed_tokens_after_a_multimodal_prompt():
+    """An image prompt without declared counts takes no offsets, but the next
+    input's offsets are placed after the engine's expanded count."""
     engine = _FakePoolingEngine()
     session = AsyncPoolingSession(
         engine,
         pooling_params=PoolingParams(task="token_embed", retain_pooling_state=True),
         request_id="session-9",
     )
-    await session.append(TokensPrompt(prompt_token_ids=[1, 2], multi_modal_data={}))
-    with pytest.raises(ValueError, match="token-id prompts"):
+    image_prompt = TokensPrompt(
+        prompt_token_ids=[1, _PAD, 2], multi_modal_data={"image": [4]}
+    )
+    with pytest.raises(ValueError, match="image_token_counts"):
+        await session.append(image_prompt, _gather([2]))
+    await session.append(image_prompt)
+    assert session.num_tokens == 6
+    with pytest.raises(ValueError, match=r"\[6, 7\)"):
         await session.append(TokensPrompt(prompt_token_ids=[3]), _gather([2]))
+    await session.append(TokensPrompt(prompt_token_ids=[3]), _gather([6]))
     await session.close()
+
+
+def _gather_images(offsets: list[int], counts: list[int]) -> PoolingParams:
+    return PoolingParams(
+        task="token_embed",
+        retain_pooling_state=True,
+        readout_offsets=offsets,
+        image_token_counts=counts,
+    )
+
+
+@pytest.mark.asyncio
+async def test_pooling_session_places_offsets_after_an_image_in_the_first_append():
+    engine = _FakePoolingEngine()
+    session = AsyncPoolingSession(
+        engine,
+        pooling_params=PoolingParams(task="token_embed", retain_pooling_state=True),
+        request_id="session-10",
+    )
+    # [1, 99x5, 2] spans [0, 7); the old one-pad count gave [0, 3).
+    await session.append(
+        TokensPrompt(prompt_token_ids=[1, _PAD, 2], multi_modal_data={"image": [5]}),
+        _gather_images([5, 6], [5]),
+    )
+    assert session.num_tokens == 7
+    with pytest.raises(ValueError, match=r"\[7, 9\)"):
+        await session.append(TokensPrompt(prompt_token_ids=[3, 4]), _gather([3, 4]))
+    await session.append(TokensPrompt(prompt_token_ids=[3, 4]), _gather([7, 8]))
+    await session.close()
+    assert engine.appended == [[1, 99, 99, 99, 99, 99, 2], [3, 4]]
+
+
+@pytest.mark.asyncio
+async def test_pooling_session_places_offsets_after_an_image_in_a_later_append():
+    engine = _FakePoolingEngine()
+    session = AsyncPoolingSession(
+        engine,
+        pooling_params=PoolingParams(task="token_embed", retain_pooling_state=True),
+        request_id="session-11",
+    )
+    await session.append(TokensPrompt(prompt_token_ids=[1, 2]), _gather([1]))
+    # Two images, expanding to 3 and 4: [3, 99x3, 4, 99x4, 5] spans [2, 12).
+    with pytest.raises(ValueError, match=r"\[2, 12\)"):
+        await session.append(
+            TokensPrompt(
+                prompt_token_ids=[3, _PAD, 4, _PAD, 5],
+                multi_modal_data={"image": [3, 4]},
+            ),
+            _gather_images([12], [3, 4]),
+        )
+    await session.append(
+        TokensPrompt(
+            prompt_token_ids=[3, _PAD, 4, _PAD, 5],
+            multi_modal_data={"image": [3, 4]},
+        ),
+        _gather_images([2, 6, 11], [3, 4]),
+    )
+    await session.append(TokensPrompt(prompt_token_ids=[6]), _gather([12]))
+    await session.close()
+    assert session.num_tokens == 13
+
+
+@pytest.mark.asyncio
+async def test_pooling_session_refuses_counts_for_another_number_of_images():
+    engine = _FakePoolingEngine()
+    session = AsyncPoolingSession(
+        engine,
+        pooling_params=PoolingParams(task="token_embed", retain_pooling_state=True),
+        request_id="session-12",
+    )
+    with pytest.raises(ValueError, match="declares 2 images, but the prompt carries 1"):
+        await session.append(
+            TokensPrompt(prompt_token_ids=[_PAD], multi_modal_data={"image": [3]}),
+            _gather_images([0], [3, 3]),
+        )
+    # A non-list image value has processor-defined item semantics, so its
+    # length is unknown and its offsets are refused, not its count.
+    with pytest.raises(ValueError, match="engine token count"):
+        await session.append(
+            TokensPrompt(prompt_token_ids=[_PAD], multi_modal_data={"image": 3}),
+            _gather_images([0], [3, 3]),
+        )
+    # Refused before the engine; the session stays usable.
+    await session.append(TokensPrompt(prompt_token_ids=[1]), _gather([0]))
+    await session.close()
+    assert engine.appended == [[1]]
+
+
+@pytest.mark.asyncio
+async def test_pooling_session_ends_when_the_engine_count_differs_from_declared():
+    """A caller whose prompt already carries an expanded run would misplace every
+    later offset; the session ends rather than continue on wrong positions."""
+    engine = _FakePoolingEngine()
+    session = AsyncPoolingSession(
+        engine,
+        pooling_params=PoolingParams(task="token_embed", retain_pooling_state=True),
+        request_id="session-13",
+    )
+    with pytest.raises(PoolingSessionError, match="processed 7 session tokens"):
+        await session.append(
+            TokensPrompt(
+                prompt_token_ids=[1, _PAD, 2], multi_modal_data={"image": [5]}
+            ),
+            _gather_images([0], [4]),
+        )
+    assert session.closed is True
+
+
+def test_pooling_session_refuses_session_level_image_token_counts() -> None:
+    with pytest.raises(ValueError, match="per input"):
+        AsyncPoolingSession(
+            _FakePoolingEngine(),
+            pooling_params=PoolingParams(
+                task="token_embed", retain_pooling_state=True, image_token_counts=[3]
+            ),
+            request_id="session-14",
+        )
