@@ -159,7 +159,7 @@ class InputProcessingContext:
         Raises:
             RuntimeError: If the model is not a multimodal model.
         """
-        mm_config = self.model_config.multimodal_config
+        mm_config = getattr(self.model_config, "multimodal_config", None)
         if mm_config is None:
             raise RuntimeError("Not a multimodal model")
 
@@ -227,11 +227,18 @@ class InputProcessingContext:
         self,
         output: JSONTree,
     ) -> JSONTree:
+        mm_config = getattr(self.model_config, "multimodal_config", None)
+        if mm_config is not None and mm_config.mm_encoder_dtype is not None:
+            # The encoder runs in its own dtype; keep its inputs in it too.
+            dtype = getattr(torch, mm_config.mm_encoder_dtype)
+        else:
+            dtype = self.model_config.dtype
+
         def _postprocess_one(x: object):
             if isinstance(x, torch.Tensor):  # noqa: SIM102
                 # This mimics the behavior of transformers.BatchFeature
                 if x.is_floating_point():
-                    x = x.to(dtype=self.model_config.dtype)
+                    x = x.to(dtype=dtype)
 
             return x
 
