@@ -10,6 +10,8 @@ from typing import Any
 
 import numpy as np
 import pytest
+import torch
+from PIL import Image
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
@@ -184,3 +186,29 @@ def test_processor_multi_video_list_kwargs(
     assert len(video_phs) == 2, (
         f"Expected exactly 2 video placeholders, got {len(video_phs)}"
     )
+
+
+@pytest.mark.parametrize(
+    ("model_config_kwargs", "expected"),
+    [({}, torch.bfloat16), ({"mm_encoder_dtype": "float32"}, torch.float32)],
+)
+def test_pixel_values_follow_mm_encoder_dtype(model_config_kwargs, expected):
+    """With an fp32 encoder, pixels reach it unrounded, not cast to bf16."""
+    ctx = build_model_context(
+        "Qwen/Qwen3.5-0.8B",
+        dtype="bfloat16",
+        model_config_kwargs=model_config_kwargs,
+        limit_mm_per_prompt={"image": 1, "video": 0},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    image = Image.fromarray(np.arange(64 * 64 * 3, dtype=np.uint8).reshape(64, 64, 3))
+
+    processed = processor(
+        "<|vision_start|><|image_pad|><|vision_end|>",
+        mm_items=processor.info.parse_mm_data({"image": [image]}),
+        hf_processor_mm_kwargs={},
+    )
+
+    item = processed["mm_kwargs"]["image"][0]
+    assert item["pixel_values"].data.dtype == expected
+    assert item["image_grid_thw"].data.dtype == torch.int64
